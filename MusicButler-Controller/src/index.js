@@ -22,6 +22,12 @@ startPortShim(() => ({
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  if (!config.clientId) {
+    console.error('[fatal] DISCORD_CLIENT_ID is not set — cannot register slash commands. ' +
+      'Set it to your bot\'s Application ID (Discord Developer Portal → General Information), not the token.');
+    process.exit(1);
+  }
+
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
   await rest.put(Routes.applicationCommands(config.clientId), { body: commandDefinitions });
   console.log('Global commands registered.');
