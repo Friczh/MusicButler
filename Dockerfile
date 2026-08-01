@@ -62,5 +62,10 @@ ENV NODE_ENV=production
 ENV POT_SERVER_HOST=127.0.0.1
 ENV POT_SERVER_PORT=4416
 ENV POT_PROVIDER_URL=http://127.0.0.1:4416
+# Render injects its own PORT at runtime and overrides this -- this is just
+# the fallback health.js uses when PORT isn't set (e.g. local/friend's-host
+# runs, where nothing is listening on it anyway).
+ENV PORT=8080
+EXPOSE 8080
 
 ENTRYPOINT ["./start.sh"]

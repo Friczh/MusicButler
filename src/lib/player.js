@@ -16,6 +16,7 @@ const { buildSabrAudioStream } = require('./sabr');
 const { PrebufferTransform } = require('./prebuffer');
 const { buildOpusPipeline, buildTranscodedOpusPipeline } = require('./demuxPipeline');
 const { config } = require('./config');
+const { log } = require('./log');
 
 // SabrStream itself throws this exact message internally when the server
 // sends a STREAM_PROTECTION_STATUS part with status 3 -- confirmed
@@ -67,16 +68,31 @@ class GuildPlayer {
         console.error(`[player:${this.guildId}] playNext after error failed:`, e.message)
       );
     });
+    // Current streaming state -- every status transition the AudioPlayer
+    // goes through (Idle <-> Buffering <-> Playing, AutoPaused when nobody's
+    // subscribed, Paused via /pause). oldState.status/newState.status are
+    // AudioPlayerStatus strings.
+    this.audioPlayer.on('stateChange', (oldState, newState) => {
+      log.debug(`player:${this.guildId}`, `audio player ${oldState.status} -> ${newState.status}`);
+    });
   }
 
   async connect(voiceChannel) {
+    log.debug(`player:${this.guildId}`, `joining voice channel ${voiceChannel.id}`);
     this.connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: voiceChannel.guild.id,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
       selfDeaf: true,
     });
+    // Discord connection state -- every hop the voice connection makes
+    // (Signalling -> Connecting -> Ready, or Disconnected/Destroyed on
+    // drop) on the way to being able to actually send audio.
+    this.connection.on('stateChange', (oldState, newState) => {
+      log.debug(`player:${this.guildId}`, `voice connection ${oldState.status} -> ${newState.status}`);
+    });
     await entersState(this.connection, VoiceConnectionStatus.Ready, 15_000);
+    log.debug(`player:${this.guildId}`, 'voice connection ready');
     this.connection.subscribe(this.audioPlayer);
   }
 
@@ -163,6 +179,7 @@ class GuildPlayer {
 
     if (!this.queue.isCurrentGeneration(generation)) return; // stale result, drop it
 
+    log.debug(`player:${this.guildId}`, `now playing ${track.videoId}`);
     this.audioPlayer.play(resource);
   }
 
@@ -328,6 +345,7 @@ class GuildPlayer {
         quality: 'best',
       });
       nodeStream = Readable.fromWeb(webStream);
+      log.debug(`player:${this.guildId}`, `${track.videoId}: direct-URL acquisition succeeded, itag ${format.itag}, ${format.bitrate}bps`);
     } catch (directErr) {
       const sd = info.streaming_data || {};
       if (!sd.server_abr_streaming_url) {
@@ -375,6 +393,7 @@ class GuildPlayer {
         nodeStream = Readable.fromWeb(sabrWebStream);
         usedSabr = true;
         streamFormat = sabrFormat;
+        log.debug(`player:${this.guildId}`, `${track.videoId}: SABR acquisition succeeded, itag ${sabrFormat.itag}, mimeType ${sabrFormat.mimeType}`);
         // Set immediately, not after Phase 2 succeeds -- a failure
         // anywhere below (prebuffer, demux/transcode) still needs this
         // track's fetch loop stopped, and _playNext()'s next call
@@ -418,9 +437,10 @@ class GuildPlayer {
     });
 
     let result;
+    let prebufferTargetBytes; // hoisted: also read by the buffer-state debug log below
     try {
       const bitrateBps = streamFormat.bitrate > 0 ? streamFormat.bitrate : config.assumedBitrateBps;
-      const prebufferTargetBytes = Math.max(
+      prebufferTargetBytes = Math.max(
         1,
         Math.ceil((bitrateBps / 8) * config.prebufferSeconds)
       );
@@ -494,6 +514,27 @@ class GuildPlayer {
         );
       },
     });
+
+    // Buffer state: periodic snapshot (not per-frame -- that'd be 50/sec)
+    // of what's currently sitting in each stage's internal buffer.
+    // stage1 (PrebufferTransform) is byte-mode: readableLength/
+    // writableLength are bytes. stage2 (opusStream, object-mode PassThrough
+    // inside buildOpusPipeline/buildTranscodedOpusPipeline) counts frames,
+    // not bytes, in object mode -- confirmed against Node's stream docs.
+    if (log.isVerbose()) {
+      const bufferLogInterval = setInterval(() => {
+        log.debug(
+          `player:${this.guildId}`,
+          `buffer state for ${track.videoId}: ` +
+          `stage1(network) ${stage1.readableLength}B held / target ${prebufferTargetBytes}B, ` +
+          `stage2(stall) ${opusStream.readableLength}/${config.stallBufferFrames} frames`
+        );
+      }, 5000);
+      const stopBufferLog = () => clearInterval(bufferLogInterval);
+      opusStream.once('end', stopBufferLog);
+      opusStream.once('error', stopBufferLog);
+      opusStream.once('close', stopBufferLog);
+    }
 
     return createAudioResource(opusStream, {
       inputType: StreamType.Opus,

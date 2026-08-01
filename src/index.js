@@ -5,6 +5,8 @@ const { commands } = require('./lib/commandDefs');
 const { QueueManager } = require('./lib/queueManager');
 const { PlayerManager } = require('./lib/player');
 const { waitForReady: waitForPotProvider } = require('./lib/potProvider');
+const { startHealthServer } = require('./lib/health');
+const { log } = require('./lib/log');
 
 const REQUIRED_ENV = ['DISCORD_TOKEN', 'YOUTUBE_COOKIES_BASE64'];
 for (const key of REQUIRED_ENV) {
@@ -18,6 +20,33 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
+// Own toggle, separate from MB_VERBOSE -- this host binds a real port and
+// only matters on Render (which requires it for its liveness check); the
+// friend's-laptop deployment has no use for an HTTP server at all. Default
+// off so a bare `docker compose up` outside Render doesn't open a port
+// nobody's checking.
+if (process.env.MB_HEALTH_ENABLED === 'true') {
+  startHealthServer(client);
+} else {
+  log.debug('health', 'MB_HEALTH_ENABLED is not "true" -- health server not started');
+}
+
+// Discord gateway connection lifecycle -- shard is singular here (no
+// sharding in use), but these are the only events discord.js exposes for
+// "is the underlying websocket to Discord currently healthy."
+client.on('shardDisconnect', (event, id) => {
+  log.debug('gateway', `shard ${id} disconnected, code ${event.code}`);
+});
+client.on('shardReconnecting', (id) => {
+  log.debug('gateway', `shard ${id} reconnecting`);
+});
+client.on('shardResume', (id, replayed) => {
+  log.debug('gateway', `shard ${id} resumed, ${replayed} events replayed`);
+});
+client.on('shardError', (err, id) => {
+  log.error('gateway', `shard ${id} error:`, err.message);
+});
+
 const queueManager = new QueueManager();
 const playerManager = new PlayerManager(queueManager);
 const ctx = { queueManager, playerManager };
@@ -29,13 +58,13 @@ for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue']) {
 }
 
 client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  log.info('discord', `Logged in as ${client.user.tag}`);
 
   try {
     await waitForPotProvider();
-    console.log('POT provider is ready.');
+    log.info('discord', 'POT provider is ready.');
   } catch (err) {
-    console.error('POT provider health check failed:', err.message);
+    log.error('discord', 'POT provider health check failed:', err.message);
     // Keep running — playback commands will surface the real error per-track
     // rather than crash-looping the whole bot over a transient sidecar hiccup.
   }
@@ -46,9 +75,9 @@ client.once('ready', async () => {
     // which avoids the hard-to-read 400 Discord returns for a missing/wrong
     // application ID.
     await client.application.commands.set(commands);
-    console.log(`Registered ${commands.length} global slash commands.`);
+    log.info('discord', `Registered ${commands.length} global slash commands.`);
   } catch (err) {
-    console.error('Failed to register slash commands:', err);
+    log.error('discord', 'Failed to register slash commands:', err);
   }
 });
 
@@ -85,4 +114,5 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   }
 });
 
+log.debug('discord', 'connecting to Discord gateway...');
 client.login(process.env.DISCORD_TOKEN);
