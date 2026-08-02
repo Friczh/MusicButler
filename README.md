@@ -27,19 +27,19 @@ git clone https://github.com/Friczh/MusicButler
 Pre-built images are also published to GHCR on every push to `main`. To run one instead of building locally, point `docker-compose.yml` at the image instead of `build: .`:
 
 ```yaml
-     services:
-       musicbutler:
-         image: ghcr.io/Friczh/MusicButler:latest
-         env_file:
-           - .env
-         restart: unless-stopped
+services:
+  musicbutler:
+    image: ghcr.io/Friczh/MusicButler:latest
+    env_file:
+      - .env
+    restart: unless-stopped
 ```
 
 ## How to build?
 
 Requirements: Docker + Docker Compose.
 
-1. Create `.env` file and fill in the required values (see **Config**) and put it in
+1. Create `.env` file and fill in the required values (see **Config**) and put it in the same folder as `docker-compose.yml`
 2. ```bash
    docker compose build --no-cache
    docker compose up -d
