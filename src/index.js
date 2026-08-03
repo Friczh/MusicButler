@@ -58,7 +58,7 @@ for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue']) {
 }
 
 client.once('ready', async () => {
-  log.info('discord', `Logged in as ${client.user.tag}`);
+  log.info('discord', `Connected to Discord with identify ${client.user.tag}`);
 
   try {
     await waitForPotProvider();

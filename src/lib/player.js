@@ -214,6 +214,63 @@ class GuildPlayer {
     );
   }
 
+  /**
+   * Direct-URL acquisition: the path youtubei.js's own info.download() can
+   * resolve without SABR. Throws "No valid URL to decipher" synchronously
+   * (before any network fetch) when the chosen format is SABR-only.
+   */
+  async _acquireDirect(track, info, format) {
+    const webStream = await info.download({
+      type: 'audio',
+      format: 'webm',
+      quality: 'best',
+    });
+    log.debug(`player:${this.guildId}`, `${track.videoId}: direct-URL acquisition succeeded, itag ${format.itag}, ${format.bitrate}bps`);
+    return Readable.fromWeb(webStream);
+  }
+
+  /**
+   * SABR acquisition via googlevideo's SabrStream (see sabr.js). Returns
+   * everything Phase 1 needs to route Phase 2 correctly: the node stream,
+   * the actually-selected format (may have a different itag than `format`
+   * -- see sabr.js's chooseAudioFormat()), whether it needs an FFmpeg
+   * transcode (non-Opus), and the abort hook for _abortActiveSabr().
+   */
+  async _acquireSabr(track, info, session, format, poToken) {
+    const clientInfo = getSabrClientInfo(session, track.isMusic ? 'YTMUSIC' : 'WEB');
+    const { audioStream: sabrWebStream, format: sabrFormat, abort } = await buildSabrAudioStream(
+      info,
+      session,
+      clientInfo,
+      poToken,
+      {
+        preferredItag: format.itag,
+        // Lets sabr.js reconnect transparently on a mid-stream
+        // RELOAD_PLAYER_RESPONSE or a recoverable stream-protection
+        // failure (stale video-bound PO token, see
+        // RECOVERABLE_SABR_ERROR_MESSAGES in sabr.js) instead of
+        // surfacing as a normal stream error that ends the track early.
+        refetchInfo: () => (
+          track.isMusic ? session.music.getInfo(track.videoId) : session.getInfo(track.videoId)
+        ),
+        // Re-mints the VIDEO-bound token (distinct from the
+        // session-level visitor_data-bound one set on
+        // session.session.player.po_token in _buildResource) -- this is
+        // what actually fixes the stale-token failure mode.
+        refetchPoToken: () => getPoToken(track.videoId),
+      }
+    );
+    log.debug(`player:${this.guildId}`, `${track.videoId}: SABR acquisition succeeded, itag ${sabrFormat.itag}, mimeType ${sabrFormat.mimeType}`);
+    const needsTranscode = !sabrFormat.mimeType?.includes('opus');
+    if (needsTranscode) {
+      console.warn(
+        `[player:${this.guildId}] SABR selected a non-Opus format for ${track.videoId} ` +
+        `(itag ${sabrFormat.itag}, mimeType "${sabrFormat.mimeType}"); transcoding via FFmpeg`
+      );
+    }
+    return { nodeStream: Readable.fromWeb(sabrWebStream), format: sabrFormat, abort, needsTranscode };
+  }
+
   async _buildResource(track) {
     // Session client_type must match the track's context — a po_token/
     // visitor_data minted for WEB is not valid for a YTMUSIC request (or
@@ -338,77 +395,77 @@ class GuildPlayer {
     // direct-download path above always requests `format: 'webm'`
     // explicitly, so it never needs this check.
     let sabrNeedsTranscode = false;
-    try {
-      const webStream = await info.download({
-        type: 'audio',
-        format: 'webm',
-        quality: 'best',
-      });
-      nodeStream = Readable.fromWeb(webStream);
-      log.debug(`player:${this.guildId}`, `${track.videoId}: direct-URL acquisition succeeded, itag ${format.itag}, ${format.bitrate}bps`);
-    } catch (directErr) {
-      const sd = info.streaming_data || {};
-      if (!sd.server_abr_streaming_url) {
-        // No SABR delivery available for this video either — genuine
-        // failure, nothing left to try. Log full diagnostic and rethrow
-        // the original direct-download error.
-        await this._logStreamFailureDiagnostic(track, info, format, directErr);
-        throw directErr;
-      }
 
-      console.warn(
-        `[player:${this.guildId}] direct download failed for ${track.videoId} ` +
-        `(${directErr.message}); falling back to SABR`
-      );
+    // Applies the result of a successful _acquireSabr() call to the
+    // Phase-1 locals above. Shared by both routing branches below.
+    const applySabr = (sabrResult) => {
+      nodeStream = sabrResult.nodeStream;
+      usedSabr = true;
+      streamFormat = sabrResult.format;
+      sabrNeedsTranscode = sabrResult.needsTranscode;
+      // Set immediately, not after Phase 2 succeeds -- a failure anywhere
+      // below (prebuffer, demux/transcode) still needs this track's
+      // fetch loop stopped, and _playNext()'s next call handles that
+      // unconditionally via _abortActiveSabr().
+      this._activeAbort = sabrResult.abort;
+    };
 
+    if (track.isMusic) {
+      // YTM (WEB_REMIX client): direct-URL confirmed working end-to-end
+      // in production. Tried first; SABR is only a safety-net fallback.
       try {
-        const clientInfo = getSabrClientInfo(session, track.isMusic ? 'YTMUSIC' : 'WEB');
-        const { audioStream: sabrWebStream, format: sabrFormat, abort } = await buildSabrAudioStream(
-          info,
-          session,
-          clientInfo,
-          poToken,
-          {
-            preferredItag: format.itag,
-            // Lets sabr.js reconnect transparently on a mid-stream
-            // RELOAD_PLAYER_RESPONSE or a recoverable stream-protection
-            // failure (stale video-bound PO token, see
-            // RECOVERABLE_SABR_ERROR_MESSAGES in sabr.js) instead of
-            // either surfacing as a normal stream error that ends the
-            // track early -- same getInfo()/session.music.getInfo()
-            // split used above, so the refetched info is shaped the same
-            // way as the original.
-            refetchInfo: () => (
-              track.isMusic ? session.music.getInfo(track.videoId) : session.getInfo(track.videoId)
-            ),
-            // Re-mints the VIDEO-bound token (distinct from the
-            // session-level visitor_data-bound one set on
-            // session.session.player.po_token above) -- this is what
-            // actually fixes the stale-token failure mode; reconnecting
-            // with refetchInfo alone but the same old token would just
-            // hit the identical error again.
-            refetchPoToken: () => getPoToken(track.videoId),
-          }
-        );
-        nodeStream = Readable.fromWeb(sabrWebStream);
-        usedSabr = true;
-        streamFormat = sabrFormat;
-        log.debug(`player:${this.guildId}`, `${track.videoId}: SABR acquisition succeeded, itag ${sabrFormat.itag}, mimeType ${sabrFormat.mimeType}`);
-        // Set immediately, not after Phase 2 succeeds -- a failure
-        // anywhere below (prebuffer, demux/transcode) still needs this
-        // track's fetch loop stopped, and _playNext()'s next call
-        // handles that unconditionally via _abortActiveSabr().
-        this._activeAbort = abort;
-        sabrNeedsTranscode = !sabrFormat.mimeType?.includes('opus');
-        if (sabrNeedsTranscode) {
-          console.warn(
-            `[player:${this.guildId}] SABR selected a non-Opus format for ${track.videoId} ` +
-            `(itag ${sabrFormat.itag}, mimeType "${sabrFormat.mimeType}"); transcoding via FFmpeg`
-          );
+        nodeStream = await this._acquireDirect(track, info, format);
+      } catch (directErr) {
+        const sd = info.streaming_data || {};
+        if (!sd.server_abr_streaming_url) {
+          await this._logStreamFailureDiagnostic(track, info, format, directErr);
+          throw directErr;
         }
-      } catch (sabrErr) {
-        await this._logStreamFailureDiagnostic(track, info, format, directErr, sabrErr);
-        throw sabrErr;
+        console.warn(
+          `[player:${this.guildId}] direct download failed for ${track.videoId} ` +
+          `(${directErr.message}); falling back to SABR`
+        );
+        try {
+          applySabr(await this._acquireSabr(track, info, session, format, poToken));
+        } catch (sabrErr) {
+          await this._logStreamFailureDiagnostic(track, info, format, directErr, sabrErr);
+          throw sabrErr;
+        }
+      }
+    } else {
+      // Plain YouTube (WEB client): increasingly forced onto SABR-only
+      // delivery -- info.download() throws "No valid URL to decipher"
+      // synchronously, before any network fetch, for these (the chosen
+      // format has no url/signature_cipher/cipher at all; confirmed via
+      // SABR-DIAGNOSTIC logging and matches an independently confirmed
+      // yt-dlp bug). Trying direct-URL first for these is a
+      // guaranteed-wasted round trip, not a real fallback path -- go
+      // straight to SABR. Direct-URL is only attempted as a last resort,
+      // for the case where this particular video has no SABR delivery
+      // available either.
+      const sd = info.streaming_data || {};
+      if (sd.server_abr_streaming_url) {
+        try {
+          applySabr(await this._acquireSabr(track, info, session, format, poToken));
+        } catch (sabrErr) {
+          console.warn(
+            `[player:${this.guildId}] SABR acquisition failed for ${track.videoId} ` +
+            `(${sabrErr.message}); falling back to direct download`
+          );
+          try {
+            nodeStream = await this._acquireDirect(track, info, format);
+          } catch (directErr) {
+            await this._logStreamFailureDiagnostic(track, info, format, directErr, sabrErr);
+            throw directErr;
+          }
+        }
+      } else {
+        try {
+          nodeStream = await this._acquireDirect(track, info, format);
+        } catch (directErr) {
+          await this._logStreamFailureDiagnostic(track, info, format, directErr);
+          throw directErr;
+        }
       }
     }
 
