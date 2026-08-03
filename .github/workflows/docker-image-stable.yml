@@ -1,0 +1,143 @@
+name: Build and publish Docker image (stable)
+
+# Builds ./Dockerfile and pushes it to GHCR as musicbutler-stable -- its
+# own image identity, separate from musicbutler-canary (see
+# docker-image-canary.yml), so the two never overwrite each other's tags.
+# No separate registry account/secret needed, GHCR accepts the repo's own
+# built-in GITHUB_TOKEN as long as this workflow is granted
+# `packages: write` below.
+#
+# Triggers:
+#   - push to main: rebuilds `:latest` (and a plain `:<short-sha>` tag,
+#     no prefix) on every merge, so "docker compose pull && docker
+#     compose up -d" always picks up the newest code.
+#   - a pushed tag like `v1.2.3`: also publishes `:1.2.3`, `:1.2`, `:1` --
+#     use this when you want to hand your friend a specific, pinned
+#     version instead of a moving `:latest`.
+#   - workflow_dispatch: manual "Run workflow" button, for a rebuild
+#     without a new commit (e.g. after ffmpeg-static/bgutil-pot upstream
+#     releases a fix, since neither is pinned to a lockfile hash here).
+#     Three inputs on the manual-run form:
+#       - sha_tag: overrides the SHA tag's VALUE outright (not a prefix
+#         glued onto it) -- e.g. entering "h3id82-hotfix" publishes
+#         exactly `:h3id82-hotfix`. Leave blank to auto-compute the
+#         normal short SHA (e.g. `:h3id82`).
+#       - codename: a milestone nickname (Android-style: Oreo, Pie).
+#         Only published as a tag if codename_toggle is checked; if it's
+#         checked and this is left blank, the run fails fast with a clear
+#         error instead of silently publishing nothing or a bad tag.
+#       - codename_toggle: off (default) = no codename tag published.
+#         On = an extra `:<codename>` tag is published alongside latest
+#         and the SHA tag.
+#   IMPORTANT for workflow_dispatch: run it with the branch selector set
+#   to `main` -- `latest` and the SHA tag are both gated on
+#   is_default_branch, which reflects the branch the run was dispatched
+#   from, not the sha_tag input.
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      sha_tag:
+        description: 'Override the SHA tag value entirely (blank = auto short SHA, e.g. h3id82)'
+        required: false
+        type: string
+        default: ''
+      codename:
+        description: 'Milestone codename (e.g. Oreo) -- required if "Enable codename tag" is checked'
+        required: false
+        type: string
+        default: ''
+      codename_toggle:
+        description: 'Enable codename tag'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  # Lower-cased below via docker/metadata-action -- GHCR rejects any
+  # uppercase in the image path, and `github.repository` preserves
+  # whatever case the account/repo name actually has. "-stable" suffix
+  # gives this its own image identity, distinct from musicbutler-canary.
+  IMAGE_NAME: ${{ github.repository }}-stable
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate codename input
+        if: ${{ inputs.codename_toggle && inputs.codename == '' }}
+        run: |
+          echo "::error::codename_toggle is checked but the codename box is empty. Fill in a codename or uncheck the toggle."
+          exit 1
+
+      # Default for the sha_tag input below when it's left blank --
+      # docker/metadata-action's own `type=sha` tag type only knows how
+      # to PREFIX the short SHA, not replace it outright, so the actual
+      # short-SHA computation has to happen here instead, to feed a plain
+      # `type=raw` tag that sha_tag can fully override.
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      # Derives tags/labels from the git ref -- e.g. a push to main
+      # produces `latest` + the short SHA as a plain tag (or whatever
+      # sha_tag was set to, on a manual dispatch run); a pushed tag
+      # `v1.2.3` additionally produces `1.2.3`, `1.2`, `1`. Also
+      # normalizes IMAGE_NAME to lowercase, which GHCR requires.
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.sha_tag != '' && inputs.sha_tag || steps.sha.outputs.short }},enable={{is_default_branch}}
+            type=raw,value=${{ inputs.codename }},enable=${{ inputs.codename_toggle }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Single-platform (linux/amd64) on purpose -- the Dockerfile
+          # already pins to a specific glibc floor (debian:bookworm-slim,
+          # see its own comments re: bgutil-pot's glibc >= 2.34
+          # requirement) and this is meant for one specific x86_64
+          # Debian host, not general distribution. Add
+          # linux/arm64 here (and switch to QEMU emulation or an
+          # arm64 runner) only if that host ever changes.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          echo "### Published image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
