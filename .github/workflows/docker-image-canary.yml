@@ -27,9 +27,6 @@ name: Build and publish Docker image (canary)
 #   is_default_branch, which reflects the branch the run was dispatched
 #   from.
 on:
-  push:
-    branches: [main]
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       codename:

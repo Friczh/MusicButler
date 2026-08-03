@@ -34,9 +34,6 @@ name: Build and publish Docker image (stable)
 #   is_default_branch, which reflects the branch the run was dispatched
 #   from, not the sha_tag input.
 on:
-  push:
-    branches: [main]
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       sha_tag:
