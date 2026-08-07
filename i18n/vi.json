@@ -6,13 +6,13 @@
   "hero.eyebrow": "Docker · Tự host · Một tiến trình duy nhất",
   "hero.title.pre": "Server Discord của bạn vẫn giữ",
   "hero.title.grad": "quyền phát nhạc.",
-  "hero.lede": "MusicButler là bot nhạc bạn tự chạy lấy. Phát nhạc thật từ YouTube và YouTube Music qua lệnh gạch chéo — không cần mua API key, không có server bên thứ ba nào giữ hàng đợi của bạn.",
+  "hero.lede": "MusicButler là bot nhạc chạy trên máy của bạn. Phát nhạc từ YouTube và YouTube Music qua lệnh — không cần mua API key, không có server bên thứ ba nào cần để chạy.",
   "hero.cta.clone": "Clone repo",
   "hero.cta.features": "Xem tính năng",
   "hero.np.playing": "ĐANG PHÁT",
 
   "features.kicker": "Vì sao nên tự host",
-  "features.title": "Được xây để đáng tin cậy, không phải để demo",
+  "features.title": "Được xây để đáng tin cậy, không phải để trưng",
   "features.lede": "Hầu hết bot nhạc Discord chạy trên server của người khác và hỏng ngay khi YouTube thay đổi gì đó. Bot này chạy trong container của chính bạn, và xử lý xác thực đúng cách.",
 
   "feature.architecture.title": "Kiến trúc",
@@ -29,7 +29,7 @@
   "feature.easy.desc_html": "Clone về, thêm file <code>.env</code>, rồi chạy <code>docker compose up</code>. Cài đặt chỉ có vậy thôi.",
 
   "deploy.title": "Cài đặt trong bốn bước",
-  "deploy.lede": "MusicButler đóng gói dạng Docker image, nên bạn không cần cài gì thủ công ngoài Docker.",
+  "deploy.lede": "MusicButler đóng gói dưới dạng Docker image, nên bạn không cần cài gì thủ công ngoài Docker.",
   "deploy.step1_html": "Fork repo trên GitHub.",
   "deploy.step2_html": "Lấy cookie YouTube và token bot Discord, cho vào file <code>.env</code>.",
   "deploy.step3_html": "Đặt file <code>.env</code> đó cạnh <code>docker-compose.yml</code> trong thư mục gốc.",
@@ -40,5 +40,5 @@
   "footer.setup": "Hướng dẫn cài đặt",
   "footer.issues": "Issues",
   "footer.features": "Tính năng",
-  "footer.note": "Giấy phép MIT. Không liên kết với Discord, Google, hay YouTube. Đây là bot của bạn — bạn dùng thế nào là việc của bạn."
+  "footer.note": "Giấy phép MIT. Không liên kết với Discord, Google, hay YouTube. Đây là bot của bạn — bạn tự chịu trách nhiệm."
 }
