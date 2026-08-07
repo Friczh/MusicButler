@@ -130,13 +130,38 @@
   .theme-toggle .icon-moon{display:none;}
   html[data-theme="light"] .theme-toggle .icon-sun{display:none;}
   html[data-theme="light"] .theme-toggle .icon-moon{display:block;}
-  .lang-select{
-    height:36px; padding:0 10px; border-radius:8px; font-family:inherit; font-size:.8rem; font-weight:500;
-    background:transparent; border:1px solid var(--outline); color:var(--on-surface-var); cursor:pointer;
-    transition:background .15s ease, color .15s ease, border-color .15s ease;
+  .lang-switch{position:relative;}
+  .lang-trigger{
+    display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 11px 0 9px;
+    border-radius:8px; background:transparent; border:1px solid var(--outline); color:var(--on-surface-var);
+    cursor:pointer; transition:background .15s ease, color .15s ease, border-color .15s ease;
   }
-  .lang-select:hover{background:var(--surface-2); color:var(--on-surface);}
-  .lang-select option{background:var(--surface-1); color:var(--on-surface);}
+  .lang-trigger:hover{background:var(--surface-2); color:var(--on-surface);}
+  .lang-trigger svg{width:14px;height:14px; flex:none;}
+  .lang-trigger .code{font-family:'Roboto Mono',monospace; font-size:.76rem; font-weight:600; letter-spacing:.02em;}
+  .lang-trigger .chev{width:9px;height:9px; transition:transform .18s ease;}
+  .lang-switch[data-open="true"] .lang-trigger .chev{transform:rotate(180deg);}
+  .lang-switch[data-open="true"] .lang-trigger{background:var(--surface-2); color:var(--on-surface); border-color:#48465a;}
+  .lang-menu{
+    position:absolute; top:calc(100% + 8px); right:0; min-width:168px; z-index:60;
+    background:var(--surface-1-a); backdrop-filter:blur(14px) saturate(150%); -webkit-backdrop-filter:blur(14px) saturate(150%);
+    border:1px solid var(--outline); border-radius:10px; padding:5px; box-shadow:var(--elev-3);
+    opacity:0; transform:translateY(-4px) scale(.98); pointer-events:none;
+    transition:opacity .15s ease, transform .15s ease;
+  }
+  .lang-switch[data-open="true"] .lang-menu{opacity:1; transform:translateY(0) scale(1); pointer-events:auto;}
+  .lang-option{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    width:100%; padding:9px 10px; border-radius:6px; background:none; border:none; cursor:pointer;
+    font-family:'Inter',sans-serif; font-size:.85rem; color:var(--on-surface-var); text-align:left;
+    transition:background .12s ease, color .12s ease;
+  }
+  .lang-option:hover{background:var(--surface-2); color:var(--on-surface);}
+  .lang-option[aria-selected="true"]{color:var(--on-surface); font-weight:600;}
+  .lang-option .code{font-family:'Roboto Mono',monospace; font-size:.72rem; color:var(--on-surface-var); font-weight:500;}
+  .lang-option[aria-selected="true"] .dot{opacity:1; transform:scale(1);}
+  .lang-option .dot{width:5px; height:5px; border-radius:50%; background:var(--accent); opacity:0; transform:scale(.4); transition:opacity .12s ease, transform .12s ease; flex:none; margin-right:2px;}
+  .lang-option .row-left{display:flex; align-items:center; gap:8px;}
   .brand{display:flex; align-items:center; gap:9px; font-weight:600; font-size:.95rem; letter-spacing:-.01em;}
   .brand .mark{width:26px;height:26px; display:grid; place-items:center; flex:none;}
   .brand .mark img{width:100%;height:100%;display:block;}
@@ -345,7 +370,14 @@
       <a href="#deploy" data-i18n="nav.selfhost">Self-host</a>
     </nav>
     <div class="appbar-actions">
-      <select id="langSelect" class="lang-select" aria-label="Language"></select>
+      <div class="lang-switch" id="langSwitch" data-open="false">
+        <button type="button" class="lang-trigger" id="langTrigger" aria-haspopup="listbox" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z" stroke="currentColor" stroke-width="1.6"/></svg>
+          <span class="code" id="langTriggerCode">EN</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="lang-menu" id="langMenu" role="listbox" aria-label="Language"></div>
+      </div>
       <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch to light mode">
         <svg class="icon-sun" width="17" height="17" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <svg class="icon-moon" width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
@@ -363,7 +395,7 @@
         <h1><span data-i18n="hero.title.pre">Your Discord server keeps</span> <span class="grad" data-i18n="hero.title.grad">the aux cord.</span></h1>
         <p class="lede" data-i18n="hero.lede">MusicButler is a music bot you run yourself. Real YouTube and YouTube&nbsp;Music playback through slash commands — no API keys to buy, no third-party server sitting on your queue.</p>
         <div class="cta-row">
-          <a href="#deploy" class="btn btn-filled" data-ripple>
+          <a href="#" class="btn btn-filled js-link" data-href="https://github.com/friczh/musicbutler" data-ripple>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 00-1.3-3.2 4.2 4.2 0 00-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 00-6.2 0C6.5 1.9 5.4 2.2 5.4 2.2a4.2 4.2 0 00-.1 3.2A4.6 4.6 0 004 8.6c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V19" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span data-i18n="hero.cta.clone">Clone the repo</span>
           </a>
@@ -448,7 +480,7 @@
             <li><span class="step-num">3</span><span data-i18n-html="deploy.step3_html">Drop that <code>.env</code> next to <code>docker-compose.yml</code> in the project root.</span></li>
             <li><span class="step-num">4</span><span data-i18n-html="deploy.step4_html">Run it, invite the bot, and start playing.</span></li>
           </ul>
-          <a href="#" class="btn btn-filled" data-ripple data-i18n="deploy.guideBtn">Read the setup guide</a>
+          <a href="#" class="btn btn-filled js-link" data-href="https://github.com/friczh/musicbutler#readme" data-ripple data-i18n="deploy.guideBtn">Read the setup guide</a>
         </div>
         <div class="deploy-term">
           <div class="term-dots"><span></span><span></span><span></span></div>
@@ -464,8 +496,8 @@
     <div class="foot-grid">
       <div class="brand"><span class="mark"><img src="assets/icon.svg" width="26" height="26" alt=""></span>MusicButler</div>
       <div class="foot-links">
-        <a href="#" data-i18n="footer.github">GitHub</a>
-        <a href="#" data-i18n="footer.setup">Setup guide</a>
+        <a href="#" class="js-link" data-href="https://github.com/friczh/musicbutler" data-i18n="footer.github">GitHub</a>
+        <a href="#" class="js-link" data-href="https://github.com/friczh/musicbutler#readme" data-i18n="footer.setup">Setup guide</a>
         <a href="#" data-i18n="footer.issues">Issues</a>
         <a href="#features" data-i18n="footer.features">Features</a>
       </div>
@@ -496,11 +528,14 @@
   })();
 </script>
 <script>
-  /* ---- i18n: load strings, detect language (localStorage → Render geo → browser), no cookies ---- */
+  /* ---- i18n: load strings. Default is always English; only a saved choice overrides it. No cookies. ---- */
   (function(){
-    const SUPPORTED=['en','vi'];
+    const SUPPORTED=[
+      {code:'en', label:'English'},
+      {code:'vi', label:'Tiếng Việt'}
+    ];
     const DEFAULT_LANG='en';
-    const RENDER_GEO_URL='https://your-app.onrender.com/geo'; // TODO: replace with your deployed Render URL
+    const codes=SUPPORTED.map(l=>l.code);
 
     function applyDict(dict){
       document.querySelectorAll('[data-i18n]').forEach(el=>{
@@ -524,42 +559,69 @@
     }
 
     async function setLang(lang, persist){
-      if(!SUPPORTED.includes(lang)) lang=DEFAULT_LANG;
+      if(!codes.includes(lang)) lang=DEFAULT_LANG;
       const dict=(await loadDict(lang)) || (await loadDict(DEFAULT_LANG));
       if(dict) applyDict(dict);
       document.documentElement.lang=lang;
       if(persist!==false) localStorage.setItem('mb-lang', lang);
-      const sel=document.getElementById('langSelect');
-      if(sel) sel.value=lang;
+      updateTrigger(lang);
+      updateMenuSelection(lang);
     }
 
-    async function detectLang(){
-      const saved=localStorage.getItem('mb-lang');
-      if(saved) return saved;
-
-      try{
-        const controller=new AbortController();
-        const t=setTimeout(()=>controller.abort(), 1200);
-        const r=await fetch(RENDER_GEO_URL, {signal:controller.signal});
-        clearTimeout(t);
-        const data=await r.json();
-        if(data && SUPPORTED.includes(data.lang)) return data.lang;
-      }catch{ /* Render asleep/offline — fall through to browser locale */ }
-
-      const nav=(navigator.language || 'en').slice(0,2);
-      return SUPPORTED.includes(nav) ? nav : DEFAULT_LANG;
+    function updateTrigger(lang){
+      const code=document.getElementById('langTriggerCode');
+      if(code) code.textContent=lang.toUpperCase();
     }
 
-    function buildSelect(){
-      const sel=document.getElementById('langSelect');
-      if(!sel) return;
-      const labels={en:'EN', vi:'VI'};
-      sel.innerHTML=SUPPORTED.map(l=>`<option value="${l}">${labels[l]||l.toUpperCase()}</option>`).join('');
-      sel.addEventListener('change', ()=> setLang(sel.value));
+    function updateMenuSelection(lang){
+      document.querySelectorAll('.lang-option').forEach(opt=>{
+        opt.setAttribute('aria-selected', opt.dataset.code===lang ? 'true' : 'false');
+      });
     }
 
-    buildSelect();
-    detectLang().then(lang=> setLang(lang));
+    function buildMenu(){
+      const menu=document.getElementById('langMenu');
+      if(!menu) return;
+      menu.innerHTML=SUPPORTED.map(l=>`
+        <button type="button" class="lang-option" role="option" data-code="${l.code}" aria-selected="false">
+          <span class="row-left"><span class="dot"></span>${l.label}</span>
+          <span class="code">${l.code.toUpperCase()}</span>
+        </button>
+      `).join('');
+      menu.querySelectorAll('.lang-option').forEach(opt=>{
+        opt.addEventListener('click', ()=>{
+          setLang(opt.dataset.code);
+          closeMenu();
+        });
+      });
+    }
+
+    const switchEl=document.getElementById('langSwitch');
+    const trigger=document.getElementById('langTrigger');
+    function openMenu(){
+      if(!switchEl) return;
+      switchEl.setAttribute('data-open','true');
+      trigger.setAttribute('aria-expanded','true');
+    }
+    function closeMenu(){
+      if(!switchEl) return;
+      switchEl.setAttribute('data-open','false');
+      trigger.setAttribute('aria-expanded','false');
+    }
+    if(trigger){
+      trigger.addEventListener('click', ()=>{
+        switchEl.getAttribute('data-open')==='true' ? closeMenu() : openMenu();
+      });
+    }
+    document.addEventListener('click', (e)=>{
+      if(switchEl && !switchEl.contains(e.target)) closeMenu();
+    });
+    document.addEventListener('keydown', (e)=>{
+      if(e.key==='Escape') closeMenu();
+    });
+
+    buildMenu();
+    setLang(localStorage.getItem('mb-lang') || DEFAULT_LANG);
   })();
 </script>
 <script>
@@ -574,6 +636,15 @@
       r.style.top=(e.clientY-rect.top-size/2)+'px';
       this.appendChild(r);
       setTimeout(()=>r.remove(),500);
+    });
+  });
+  /* href="#" on these keeps the real destination out of the status-bar hover preview;
+     navigation happens here instead, on click. */
+  document.querySelectorAll('.js-link').forEach(el=>{
+    el.addEventListener('click', function(e){
+      e.preventDefault();
+      const url=this.getAttribute('data-href');
+      if(url) window.open(url, '_blank', 'noopener');
     });
   });
   const eqBars=document.querySelectorAll('.eq span');
