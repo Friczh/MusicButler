@@ -1,0 +1,44 @@
+{
+  "nav.features": "Features",
+  "nav.selfhost": "Self-host",
+  "nav.deploy": "Deploy your bot",
+
+  "hero.eyebrow": "Docker · Self-hosted · Single process",
+  "hero.title.pre": "Your Discord server keeps",
+  "hero.title.grad": "the aux cord.",
+  "hero.lede": "MusicButler is a music bot you run yourself. Real YouTube and YouTube Music playback through slash commands — no API keys to buy, no third-party server sitting on your queue.",
+  "hero.cta.clone": "Clone the repo",
+  "hero.cta.features": "See features",
+  "hero.np.playing": "NOW PLAYING",
+
+  "features.kicker": "Why self-host",
+  "features.title": "Built for reliability, not a demo",
+  "features.lede": "Most Discord music bots run on someone else's server and break the moment YouTube changes something. This one runs in your own container, and it handles authentication the right way.",
+
+  "feature.architecture.title": "Architecture",
+  "feature.architecture.desc": "One Node.js process — no gRPC workers, no extra transport layer just trying to keep two services in sync.",
+  "feature.speed.title": "Speed",
+  "feature.speed.desc": "Audio passes straight through as raw Opus, no re-encoding. It also prebuffers ahead of the stream so playback doesn't stutter at the start.",
+  "feature.stability.title": "Stability",
+  "feature.stability.desc": "If a stream drops it reconnects on its own with backoff, and every connection has an error listener so a failure ends up in your logs instead of just going quiet.",
+  "feature.lightweight.title": "Lightweight",
+  "feature.lightweight.desc": "Voice encryption is pure JS, so there's nothing to compile. Runs fine even when there's barely any memory to spare.",
+  "feature.privacy.title": "Privacy",
+  "feature.privacy.desc": "It's all running on your own machine. The only network calls it makes are to Discord and YouTube — nobody else sees your cookies or your queue.",
+  "feature.easy.title": "Easy to host",
+  "feature.easy.desc_html": "Clone it, drop in an <code>.env</code>, and <code>docker compose up</code>. That's really the whole setup.",
+
+  "deploy.title": "Set it up in four steps",
+  "deploy.lede": "MusicButler ships as a Docker image, so there's nothing to install by hand beyond Docker itself.",
+  "deploy.step1_html": "Fork the repo on GitHub.",
+  "deploy.step2_html": "Grab your YouTube cookies and Discord bot token, and put them in a <code>.env</code> file.",
+  "deploy.step3_html": "Drop that <code>.env</code> next to <code>docker-compose.yml</code> in the project root.",
+  "deploy.step4_html": "Run it, invite the bot, and start playing.",
+  "deploy.guideBtn": "Read the setup guide",
+
+  "footer.github": "GitHub",
+  "footer.setup": "Setup guide",
+  "footer.issues": "Issues",
+  "footer.features": "Features",
+  "footer.note": "MIT-licensed. Not affiliated with Discord, Google, or YouTube. It's your bot — what you do with it is on you."
+}

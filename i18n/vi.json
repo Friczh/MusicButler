@@ -1,0 +1,44 @@
+{
+  "nav.features": "Tính năng",
+  "nav.selfhost": "Tự host",
+  "nav.deploy": "Triển khai bot",
+
+  "hero.eyebrow": "Docker · Tự host · Một tiến trình duy nhất",
+  "hero.title.pre": "Server Discord của bạn vẫn giữ",
+  "hero.title.grad": "quyền phát nhạc.",
+  "hero.lede": "MusicButler là bot nhạc bạn tự chạy lấy. Phát nhạc thật từ YouTube và YouTube Music qua lệnh gạch chéo — không cần mua API key, không có server bên thứ ba nào giữ hàng đợi của bạn.",
+  "hero.cta.clone": "Clone repo",
+  "hero.cta.features": "Xem tính năng",
+  "hero.np.playing": "ĐANG PHÁT",
+
+  "features.kicker": "Vì sao nên tự host",
+  "features.title": "Được xây để đáng tin cậy, không phải để demo",
+  "features.lede": "Hầu hết bot nhạc Discord chạy trên server của người khác và hỏng ngay khi YouTube thay đổi gì đó. Bot này chạy trong container của chính bạn, và xử lý xác thực đúng cách.",
+
+  "feature.architecture.title": "Kiến trúc",
+  "feature.architecture.desc": "Chỉ một tiến trình Node.js — không có gRPC worker, không có lớp truyền tải phụ chỉ để giữ đồng bộ hai dịch vụ.",
+  "feature.speed.title": "Tốc độ",
+  "feature.speed.desc": "Âm thanh truyền thẳng dạng Opus thô, không mã hóa lại. Có prebuffer trước luồng để phát không bị giật lúc đầu.",
+  "feature.stability.title": "Ổn định",
+  "feature.stability.desc": "Nếu luồng bị rớt, nó tự kết nối lại có backoff, và mọi kết nối đều có trình lắng nghe lỗi để lỗi xuất hiện trong log thay vì im lặng.",
+  "feature.lightweight.title": "Nhẹ",
+  "feature.lightweight.desc": "Mã hóa voice thuần JS, không cần biên dịch gì cả. Chạy tốt kể cả khi bộ nhớ còn rất ít.",
+  "feature.privacy.title": "Riêng tư",
+  "feature.privacy.desc": "Mọi thứ chạy trên máy của chính bạn. Nó chỉ gọi mạng tới Discord và YouTube — không ai khác thấy được cookie hay hàng đợi của bạn.",
+  "feature.easy.title": "Dễ host",
+  "feature.easy.desc_html": "Clone về, thêm file <code>.env</code>, rồi chạy <code>docker compose up</code>. Cài đặt chỉ có vậy thôi.",
+
+  "deploy.title": "Cài đặt trong bốn bước",
+  "deploy.lede": "MusicButler đóng gói dạng Docker image, nên bạn không cần cài gì thủ công ngoài Docker.",
+  "deploy.step1_html": "Fork repo trên GitHub.",
+  "deploy.step2_html": "Lấy cookie YouTube và token bot Discord, cho vào file <code>.env</code>.",
+  "deploy.step3_html": "Đặt file <code>.env</code> đó cạnh <code>docker-compose.yml</code> trong thư mục gốc.",
+  "deploy.step4_html": "Chạy lên, mời bot vào server, và bắt đầu nghe nhạc.",
+  "deploy.guideBtn": "Xem hướng dẫn cài đặt",
+
+  "footer.github": "GitHub",
+  "footer.setup": "Hướng dẫn cài đặt",
+  "footer.issues": "Issues",
+  "footer.features": "Tính năng",
+  "footer.note": "Giấy phép MIT. Không liên kết với Discord, Google, hay YouTube. Đây là bot của bạn — bạn dùng thế nào là việc của bạn."
+}
