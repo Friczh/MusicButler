@@ -53,7 +53,7 @@ const playerManager = new PlayerManager(queueManager, client);
 const ctx = { queueManager, playerManager };
 
 const commandHandlers = new Collection();
-for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue', 'clearmessage', 'help', 'grantopnopassword']) {
+for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue', 'clearmessage', 'help', 'panel', 'grantopnopassword']) {
   const handler = require(`./commands/${file}`);
   commandHandlers.set(handler.name, handler);
 }

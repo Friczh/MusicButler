@@ -17,6 +17,7 @@ const ENTRIES = [
   ['/queue move <from> <to>', 'Move a track to a new position'],
   ['/queue clear', 'Clear the queue'],
   ['/clearmessage', "Delete this bot's recent messages in this channel"],
+  ['/panel', 'Bring up the control panel in this channel'],
   ['/help', 'Show this list'],
 ];
 

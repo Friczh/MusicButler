@@ -29,6 +29,12 @@ class GuildQueue {
     return this.tracks.length;
   }
 
+  /** Insert a track at the front of the queue -- plays next, ahead of everything else. */
+  addFront(track) {
+    this.tracks.unshift(track);
+    return this.tracks.length;
+  }
+
   next() {
     this.playing = this.tracks.shift() ?? null;
     return this.playing;

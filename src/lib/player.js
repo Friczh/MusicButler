@@ -144,6 +144,59 @@ class GuildPlayer {
     }
   }
 
+  /**
+   * Snapshots the abort handle for whatever is CURRENTLY playing (if
+   * SABR-delivered). Must be called before prepareResource() for a
+   * different track -- building that track's resource can overwrite
+   * this._activeAbort as a side effect (see applySabr() inside
+   * _buildResource()), which would otherwise lose the outgoing track's
+   * handle before it's ever cleaned up.
+   */
+  snapshotActiveAbort() {
+    return this._activeAbort;
+  }
+
+  /**
+   * Resolves+deciphers `track` into a playable resource without touching
+   * the queue or audioPlayer -- lets a caller build a resource ahead of
+   * time (in parallel with something else, e.g. grantopnopassword's
+   * public taunt message) and swap it in later via swapInPrebuilt().
+   */
+  async prepareResource(track) {
+    return this._buildResource(track);
+  }
+
+  /**
+   * Swaps an already-built `resource` into playback immediately, ahead
+   * of everything else. `.play()` transitions directly from
+   * Playing/Buffering to Playing without an intermediate Idle state
+   * (confirmed against installed source: @discordjs/voice's AudioPlayer
+   * docstring -- "the player will not transition to the Idle state
+   * during the swap over"), so this can't race the Idle listener /
+   * _playNext(). Whatever was playing is pushed back to the front of the
+   * queue to resume after (from the start -- there's no seek/position
+   * tracking anywhere in this codebase, so "resume" always means
+   * "re-extract and replay from 0", same as a normal skip()).
+   *
+   * @param outgoingAbort - snapshotActiveAbort()'s return value, captured
+   *   BEFORE prepareResource() ran for `track`.
+   */
+  swapInPrebuilt(track, resource, outgoingAbort) {
+    if (outgoingAbort) {
+      try {
+        outgoingAbort();
+      } catch { /* already finished/aborted -- nothing to clean up */ }
+    }
+
+    if (this.queue.playing) this.queue.addFront(this.queue.playing);
+    this.queue.playing = track;
+    // Invalidates any unrelated in-flight _playNext() extraction (e.g. a
+    // skip() that happened to fire around the same moment) so it can't
+    // land after this swap and clobber it.
+    this.queue.bumpGeneration();
+    this.audioPlayer.play(resource);
+  }
+
   /** Fire-and-forget edit-in-place panel refresh; errors are logged, not thrown. */
   _updatePanelInPlace() {
     if (!this.client) return;
