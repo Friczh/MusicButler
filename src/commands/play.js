@@ -38,12 +38,12 @@ async function resolveAndQueue(query, { voiceChannel, guildId, channelId, reques
         return { ok: false, errorText: 'That playlist has no playable tracks.' };
       }
       tracksToQueue = resolved;
-      replyText = `Queued playlist: **${resolved.length}** track${resolved.length === 1 ? '' : 's'}`;
+      replyText = `📜 Queued playlist: **${resolved.length}** track${resolved.length === 1 ? '' : 's'}`;
     } else {
       // 'video' or 'search' — resolveQuery re-derives this itself.
       const resolved = await resolveQuery(session, query);
       tracksToQueue = [resolved];
-      replyText = `Queued: **${resolved.title}**`;
+      replyText = `🎵 Queued: **${resolved.title}**`;
     }
   } catch (err) {
     return { ok: false, errorText: `Couldn't resolve that: ${err.message}` };

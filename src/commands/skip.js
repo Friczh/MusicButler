@@ -9,6 +9,6 @@ module.exports = {
       return;
     }
     player.skip();
-    await interaction.reply('Skipped.');
+    await interaction.reply('⏭️ Skipped.');
   },
 };

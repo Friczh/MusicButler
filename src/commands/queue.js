@@ -21,16 +21,16 @@ const REFRESH_COOLDOWN_MS = 5000;
 function buildQueuePage(queue, tracks, page, totalPages) {
   const start = page * PAGE_SIZE;
   const pageTracks = tracks.slice(start, start + PAGE_SIZE);
-  const lines = pageTracks.map((t, i) => `${start + i + 1}. ${t.title}`);
+  const lines = pageTracks.map((t, i) => `**${start + i + 1}.** ${t.title}`);
 
   const embed = new EmbedBuilder()
-    .setTitle('Queue')
+    .setTitle('📜 Queue')
     .setColor(0x5865f2)
     .setDescription(lines.length ? lines.join('\n') : '*(nothing on this page)*')
-    .setFooter({ text: `Page ${page + 1}/${totalPages} · ${tracks.length} track${tracks.length === 1 ? '' : 's'} queued` });
+    .setFooter({ text: `📄 Page ${page + 1}/${totalPages} · ${tracks.length} track${tracks.length === 1 ? '' : 's'} queued` });
 
   if (queue.playing) {
-    embed.addFields({ name: 'Now playing', value: queue.playing.title });
+    embed.addFields({ name: '▶️ Now playing', value: queue.playing.title });
   }
 
   return embed;
@@ -40,17 +40,20 @@ function buildQueueRow(page, totalPages) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('queue_prev')
-      .setLabel('◀ Previous')
+      .setEmoji('⏮️')
+      .setLabel('Previous')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 0),
     new ButtonBuilder()
       .setCustomId('queue_next')
-      .setLabel('Next ▶')
+      .setEmoji('⏭️')
+      .setLabel('Next')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= totalPages - 1),
     new ButtonBuilder()
       .setCustomId('queue_refresh')
-      .setLabel('⟳ Refresh')
+      .setEmoji('🔄')
+      .setLabel('Refresh')
       .setStyle(ButtonStyle.Secondary)
   );
 }
@@ -130,7 +133,7 @@ module.exports = {
           await interaction.reply({ content: 'Invalid position.', ephemeral: true });
           return;
         }
-        await interaction.reply(`Removed: **${removed.title}**`);
+        await interaction.reply(`🗑️ Removed: **${removed.title}**`);
         return;
       }
 
@@ -138,7 +141,7 @@ module.exports = {
         const a = interaction.options.getInteger('position_a', true);
         const b = interaction.options.getInteger('position_b', true);
         const ok = queue.swap(a - 1, b - 1);
-        await interaction.reply(ok ? `Swapped ${a} and ${b}.` : 'Invalid positions.');
+        await interaction.reply(ok ? `🔀 Swapped ${a} and ${b}.` : 'Invalid positions.');
         return;
       }
 
@@ -146,13 +149,13 @@ module.exports = {
         const from = interaction.options.getInteger('from', true);
         const to = interaction.options.getInteger('to', true);
         const ok = queue.move(from - 1, to - 1);
-        await interaction.reply(ok ? `Moved ${from} to ${to}.` : 'Invalid positions.');
+        await interaction.reply(ok ? `➡️ Moved ${from} to ${to}.` : 'Invalid positions.');
         return;
       }
 
       case 'clear': {
         queue.clear();
-        await interaction.reply('Queue cleared.');
+        await interaction.reply('🧹 Queue cleared.');
         return;
       }
 

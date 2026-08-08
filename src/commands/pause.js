@@ -9,6 +9,6 @@ module.exports = {
       return;
     }
     const ok = player.pause();
-    await interaction.reply(ok ? 'Paused.' : "Couldn't pause.");
+    await interaction.reply(ok ? '⏸️ Paused.' : "Couldn't pause.");
   },
 };

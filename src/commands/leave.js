@@ -12,6 +12,6 @@ module.exports = {
     // the channel (including the panel) -- a normal reply here would just
     // be a message that's either deleted moments later by that cleanup or
     // races it and survives, neither of which is useful.
-    await interaction.reply({ content: 'Left the voice channel and cleared the queue.', ephemeral: true });
+    await interaction.reply({ content: '👋 Left the voice channel and cleared the queue.', ephemeral: true });
   },
 };

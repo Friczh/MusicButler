@@ -9,6 +9,6 @@ module.exports = {
       return;
     }
     const ok = player.resume();
-    await interaction.reply(ok ? 'Resumed.' : "Couldn't resume.");
+    await interaction.reply(ok ? '▶️ Resumed.' : "Couldn't resume.");
   },
 };

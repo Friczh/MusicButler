@@ -14,6 +14,6 @@ module.exports = {
     player.queue.textChannelId = interaction.channelId;
 
     await repostPanel(interaction.client, player.queue, { isPaused: player.isPaused() });
-    await interaction.editReply('Panel posted.');
+    await interaction.editReply('📌 Panel posted.');
   },
 };
