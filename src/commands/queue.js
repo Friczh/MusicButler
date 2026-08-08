@@ -7,6 +7,7 @@ const {
   ButtonStyle,
   ComponentType,
 } = require('discord.js');
+const { getIcon, getIconText } = require('../lib/icons');
 
 const PAGE_SIZE = 25;
 // Root cause of the 50035 crash: replying with a plain string built from
@@ -24,13 +25,13 @@ function buildQueuePage(queue, tracks, page, totalPages) {
   const lines = pageTracks.map((t, i) => `**${start + i + 1}.** ${t.title}`);
 
   const embed = new EmbedBuilder()
-    .setTitle('📜 Queue')
+    .setTitle(`${getIconText('queue')} Queue`)
     .setColor(0x5865f2)
     .setDescription(lines.length ? lines.join('\n') : '*(nothing on this page)*')
     .setFooter({ text: `📄 Page ${page + 1}/${totalPages} · ${tracks.length} track${tracks.length === 1 ? '' : 's'} queued` });
 
   if (queue.playing) {
-    embed.addFields({ name: '▶️ Now playing', value: queue.playing.title });
+    embed.addFields({ name: `${getIconText('play')} Now playing`, value: queue.playing.title });
   }
 
   return embed;
@@ -40,19 +41,19 @@ function buildQueueRow(page, totalPages) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('queue_prev')
-      .setEmoji('⏮️')
+      .setEmoji(getIcon('back'))
       .setLabel('Previous')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 0),
     new ButtonBuilder()
       .setCustomId('queue_next')
-      .setEmoji('⏭️')
+      .setEmoji(getIcon('skip'))
       .setLabel('Next')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= totalPages - 1),
     new ButtonBuilder()
       .setCustomId('queue_refresh')
-      .setEmoji('🔄')
+      .setEmoji(getIcon('refresh'))
       .setLabel('Refresh')
       .setStyle(ButtonStyle.Secondary)
   );

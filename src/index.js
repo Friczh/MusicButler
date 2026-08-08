@@ -7,6 +7,7 @@ const { PlayerManager } = require('./lib/player');
 const { waitForReady: waitForPotProvider } = require('./lib/potProvider');
 const { startHealthServer } = require('./lib/health');
 const { handlePanelInteraction } = require('./lib/panelInteractions');
+const { initIcons } = require('./lib/icons');
 const { log } = require('./lib/log');
 
 const REQUIRED_ENV = ['DISCORD_TOKEN', 'YOUTUBE_COOKIES_BASE64'];
@@ -79,6 +80,18 @@ client.once('ready', async () => {
     log.info('discord', `Registered ${commands.length} global slash commands.`);
   } catch (err) {
     log.error('discord', 'Failed to register slash commands:', err);
+  }
+
+  // Best-effort: getIcon() falls back to Unicode emoji if this hasn't
+  // finished yet or fails outright, so it's fine to not await-block
+  // startup on it -- but it's quick (a handful of uploads, once ever)
+  // and this only runs once per ready event, so awaiting keeps the panel
+  // right the first time it's posted rather than racing it.
+  try {
+    await initIcons(client);
+    log.info('discord', 'Custom panel icons ready.');
+  } catch (err) {
+    log.error('discord', 'Custom icon setup failed (falling back to Unicode):', err.message);
   }
 });
 

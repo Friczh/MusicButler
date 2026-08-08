@@ -7,6 +7,7 @@ const {
   ButtonStyle,
 } = require('discord.js');
 const { log } = require('./log');
+const { getIcon, getIconText } = require('./icons');
 
 const COLOR = 0x5865f2;
 
@@ -28,30 +29,19 @@ function buildPanelEmbed({ track, queueLength, isPaused }) {
   const embed = new EmbedBuilder().setColor(COLOR);
 
   if (!track) {
-    return embed.setTitle('🎵 Nothing playing').setDescription('Queue is empty — hit **➕ Play** to add something.');
+    return embed
+      .setTitle(`${getIconText('stop')} Nothing playing`)
+      .setDescription(`Queue is empty — hit **${getIconText('add')} Play** to add something.`);
   }
 
-  embed
-    .setTitle(`${isPaused ? '⏸️' : '▶️'} ${track.title}`)
-    // hqdefault.jpg exists for every YouTube video regardless of upload
-    // resolution -- unlike maxresdefault.jpg, which 404s on a lot of
-    // older/lower-res uploads.
-    .setThumbnail(`https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg`)
-    .addFields(
-      // Static duration only -- no elapsed-time/progress bar, which would
-      // require a recurring edit interval to keep current. Set once when
-      // the panel is built/reposted.
-      { name: '⏱️ Duration', value: formatDuration(track.duration), inline: true },
-      { name: '📜 Up next', value: String(queueLength), inline: true }
-    );
+  // Everything except the title packed onto one line -- duration, queue
+  // count, requester -- rather than separate embed fields, which each
+  // carry their own name/value line and padding.
+  const parts = [`⏱️ ${formatDuration(track.duration)}`, `${getIconText('queue')} ${queueLength} queued`];
+  if (track.requestedBy) parts.push(`🙋 <@${track.requestedBy}>`);
 
-  if (track.requestedBy) {
-    // Embed field values parse mentions; author/footer text does not --
-    // confirmed against Discord's embed rendering behavior.
-    embed.addFields({ name: '🙋 Requested by', value: `<@${track.requestedBy}>`, inline: true });
-  }
-
-  return embed;
+  const statusIcon = getIconText(isPaused ? 'pause' : 'play');
+  return embed.setTitle(`${statusIcon} ${track.title}`).setDescription(parts.join('  •  '));
 }
 
 function buildPanelComponents(isPaused) {
@@ -59,13 +49,13 @@ function buildPanelComponents(isPaused) {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('panel_pauseresume')
-        .setEmoji(isPaused ? '▶️' : '⏸️')
+        .setEmoji(getIcon(isPaused ? 'play' : 'pause'))
         .setLabel(isPaused ? 'Resume' : 'Pause')
         .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_skip').setEmoji('⏭️').setLabel('Skip').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_stop').setEmoji('⏹️').setLabel('Stop').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('panel_queue').setEmoji('📜').setLabel('Queue').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_play').setEmoji('➕').setLabel('Play').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('panel_skip').setEmoji(getIcon('skip')).setLabel('Skip').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('panel_stop').setEmoji(getIcon('stop')).setLabel('Stop').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setLabel('Queue').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('add')).setLabel('Play').setStyle(ButtonStyle.Primary)
     ),
   ];
 }

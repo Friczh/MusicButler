@@ -39,6 +39,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --legacy-peer-deps || npm install --omit=dev --legacy-peer-deps
 
 COPY src ./src
+COPY assets ./assets
 COPY start.sh ./start.sh
 RUN chmod +x ./start.sh
 

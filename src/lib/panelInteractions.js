@@ -8,6 +8,7 @@ const {
   ActionRowBuilder,
 } = require('discord.js');
 const { buildPanelEmbed, buildPanelComponents } = require('./panel');
+const { getIconText } = require('./icons');
 const { log } = require('./log');
 
 const PLAY_MODAL_ID = 'panel_play_modal';
@@ -19,13 +20,13 @@ function buildQueueEmbed(queue) {
   const lines = tracks.slice(0, QUEUE_LIST_LIMIT).map((t, i) => `**${i + 1}.** ${t.title}`);
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('📜 Queue')
+    .setTitle(`${getIconText('queue')} Queue`)
     .setDescription(lines.length ? lines.join('\n') : '*(empty)*');
   if (tracks.length > QUEUE_LIST_LIMIT) {
     embed.setFooter({ text: `+ ${tracks.length - QUEUE_LIST_LIMIT} more — use /queue list to page through` });
   }
   if (queue.playing) {
-    embed.addFields({ name: '▶️ Now playing', value: queue.playing.title });
+    embed.addFields({ name: `${getIconText('play')} Now playing`, value: queue.playing.title });
   }
   return embed;
 }
