@@ -15,6 +15,13 @@ const FALLBACK = {
   add: '➕',
   back: '⏮️',
   refresh: '🔄',
+  // Not wired into any UI yet -- uploaded ahead of the shuffle/repeat
+  // feature so the icons are ready when that's built.
+  shuffle_on: '🔀',
+  shuffle_off: '🔀',
+  repeat_all: '🔁',
+  repeat_one: '🔂',
+  repeat_off: '🔁',
 };
 
 const ASSET_DIR = path.join(__dirname, '..', '..', 'assets', 'icons');
@@ -25,10 +32,19 @@ const cache = new Map();
 
 /**
  * Uploads MusicButler's custom control-panel icon set as application
- * emoji (visible to the bot in every server it's in, not just one guild)
- * if they don't already exist, and caches the results for synchronous
- * lookup via getIcon(). Call once after the client is ready; safe to call
- * again (e.g. on reconnect) -- existing emoji are reused, not duplicated.
+ * emoji (visible to the bot in every server it's in, not just one guild).
+ * Call once after the client is ready; safe to call again (e.g. on
+ * reconnect).
+ *
+ * Always deletes and recreates each emoji rather than reusing an existing
+ * one by name -- Discord's application-emoji edit endpoint only supports
+ * renaming, there is NO way to update an emoji's image in place (confirmed
+ * against installed source: ApplicationEmojiManager.edit() only PATCHes
+ * `name`). Reuse-by-name was the original design here, and it meant
+ * swapping the bundled PNG on disk silently did nothing -- the live emoji
+ * stayed whatever image was uploaded the first time. Delete+recreate on
+ * every startup guarantees what's live always matches what's bundled, at
+ * the cost of a handful of extra API calls once per boot (cheap).
  */
 async function initIcons(client) {
   const app = client.application;
@@ -49,8 +65,14 @@ async function initIcons(client) {
     const emojiName = `mb_${name}`;
     const found = existing.find((e) => e.name === emojiName);
     if (found) {
-      cache.set(name, { id: found.id, name: found.name });
-      continue;
+      try {
+        await app.emojis.delete(found.id);
+      } catch (err) {
+        log.error('icons', `couldn't delete stale emoji ${emojiName}: ${err.message}`);
+        // Fall through to try creating anyway -- Discord allows duplicate
+        // application emoji names, so a failed delete just leaves an
+        // orphaned old one rather than blocking the refresh.
+      }
     }
     try {
       const created = await app.emojis.create({
