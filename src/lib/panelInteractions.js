@@ -16,16 +16,16 @@ const QUEUE_LIST_LIMIT = 25;
 
 function buildQueueEmbed(queue) {
   const tracks = queue.list();
-  const lines = tracks.slice(0, QUEUE_LIST_LIMIT).map((t, i) => `${i + 1}. ${t.title}`);
+  const lines = tracks.slice(0, QUEUE_LIST_LIMIT).map((t, i) => `**${i + 1}.** ${t.title}`);
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('Queue')
+    .setTitle('📜 Queue')
     .setDescription(lines.length ? lines.join('\n') : '*(empty)*');
   if (tracks.length > QUEUE_LIST_LIMIT) {
     embed.setFooter({ text: `+ ${tracks.length - QUEUE_LIST_LIMIT} more — use /queue list to page through` });
   }
   if (queue.playing) {
-    embed.addFields({ name: 'Now playing', value: queue.playing.title });
+    embed.addFields({ name: '▶️ Now playing', value: queue.playing.title });
   }
   return embed;
 }

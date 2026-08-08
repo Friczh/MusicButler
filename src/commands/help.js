@@ -26,7 +26,7 @@ module.exports = {
   async execute(interaction) {
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
-      .setTitle('MusicButler commands')
+      .setTitle('🎵 MusicButler commands')
       .setDescription(ENTRIES.map(([cmd, desc]) => `**${cmd}** — ${desc}`).join('\n'));
     await interaction.reply({ embeds: [embed], ephemeral: true });
   },
