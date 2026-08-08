@@ -12,6 +12,10 @@ class GuildQueue {
     this.generation = 0;
     this.voiceChannelId = null;
     this.textChannelId = null;
+    // ID of the currently-live control panel message in textChannelId, if
+    // any -- see panel.js. Repost-on-track-change replaces this; leaving/
+    // /clearmessage clears it out via messageCleanup.js.
+    this.panelMessageId = null;
   }
 
   add(track) {

@@ -80,7 +80,7 @@ test('resolveQuery: a plain YouTube URL calls session.getBasicInfo(), not sessio
 
   const result = await resolveQuery(session, 'https://www.youtube.com/watch?v=abc123');
   assert.deepEqual(calls, [['getBasicInfo', 'abc123']]);
-  assert.deepEqual(result, { videoId: 'abc123', isMusic: false, title: 'A Video' });
+  assert.deepEqual(result, { videoId: 'abc123', isMusic: false, title: 'A Video', duration: 0 });
 });
 
 test('resolveQuery: a music.youtube.com URL calls session.music.getInfo(), not session.getBasicInfo()', async () => {
@@ -105,7 +105,7 @@ test('resolveQuery: a music.youtube.com URL calls session.music.getInfo(), not s
 
   const result = await resolveQuery(session, 'https://music.youtube.com/watch?v=xyz789');
   assert.deepEqual(calls, [['music.getInfo', 'xyz789']]);
-  assert.deepEqual(result, { videoId: 'xyz789', isMusic: true, title: 'A Song' });
+  assert.deepEqual(result, { videoId: 'xyz789', isMusic: true, title: 'A Song', duration: 0 });
 });
 
 test('resolveQuery: falls back to videoId when title is missing', async () => {
@@ -119,6 +119,11 @@ test('resolveQuery: a free-text query searches and takes the first video result'
   const fakeVideo = Object.create(YTNodes.Video.prototype);
   fakeVideo.video_id = 'searched1';
   fakeVideo.title = { text: 'Searched Song' };
+  // duration is a getter on Video.prototype that reads these fields --
+  // stub them so it doesn't throw on this bare fake (confirmed against
+  // installed source: Video.js).
+  fakeVideo.length_text = undefined;
+  fakeVideo.thumbnail_overlays = { firstOfType: () => undefined };
 
   const session = {
     search: async (query, filters) => {
@@ -129,7 +134,7 @@ test('resolveQuery: a free-text query searches and takes the first video result'
   };
 
   const result = await resolveQuery(session, 'some great song');
-  assert.deepEqual(result, { videoId: 'searched1', isMusic: false, title: 'Searched Song' });
+  assert.deepEqual(result, { videoId: 'searched1', isMusic: false, title: 'Searched Song', duration: 0 });
 });
 
 test('resolveQuery: throws when a search finds nothing', async () => {

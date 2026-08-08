@@ -96,7 +96,7 @@ function classifyInput(input) {
  * Resolves a /play argument (URL or free-text query) to a video ID.
  * @param {import('youtubei.js').Innertube} session
  * @param {string} query
- * @returns {Promise<{ videoId: string, isMusic: boolean, title: string }>}
+ * @returns {Promise<{ videoId: string, isMusic: boolean, title: string, duration: number }>}
  */
 async function resolveQuery(session, query) {
   const direct = parseVideoIdFromUrl(query.trim());
@@ -122,6 +122,11 @@ async function resolveQuery(session, query) {
       videoId: direct.videoId,
       isMusic: direct.isMusic,
       title: info.basic_info.title ?? direct.videoId,
+      // basic_info.duration is a plain integer (seconds) -- confirmed
+      // against installed source (VideoDetails.js: `parseInt(data.lengthSeconds)`),
+      // same shape whether basic_info came from getBasicInfo or
+      // music.getInfo() (TrackInfo shares the MediaInfo mixin).
+      duration: info.basic_info.duration ?? 0,
     };
   }
 
@@ -134,6 +139,10 @@ async function resolveQuery(session, query) {
     videoId: firstVideo.video_id,
     isMusic: false,
     title: firstVideo.title?.text ?? firstVideo.video_id,
+    // Video node's `duration` is a getter returning { text, seconds } --
+    // a different shape than VideoDetails' plain int above (confirmed
+    // against installed source: Video.js). seconds is 0 if unparseable.
+    duration: firstVideo.duration?.seconds ?? 0,
   };
 }
 
@@ -153,7 +162,7 @@ async function resolveQuery(session, query) {
  * @param {string} playlistId
  * @param {boolean} isMusic
  * @param {{ maxTracks?: number }} [opts]
- * @returns {Promise<Array<{ videoId: string, isMusic: boolean, title: string }>>}
+ * @returns {Promise<Array<{ videoId: string, isMusic: boolean, title: string, duration: number }>>}
  */
 async function resolvePlaylistTracks(session, playlistId, isMusic, { maxTracks = Infinity } = {}) {
   const tracks = [];
@@ -166,7 +175,9 @@ async function resolvePlaylistTracks(session, playlistId, isMusic, { maxTracks =
         if (tracks.length >= maxTracks) break;
         const playable = item.item_type === 'song' || item.item_type === 'video';
         if (!playable || !item.id) continue; // skip unavailable / non-track entries
-        tracks.push({ videoId: item.id, isMusic: true, title: item.title ?? item.id });
+        // { text, seconds } shape, same as PlaylistVideo below (confirmed
+        // against installed source: MusicResponsiveListItem.js).
+        tracks.push({ videoId: item.id, isMusic: true, title: item.title ?? item.id, duration: item.duration?.seconds ?? 0 });
       }
       if (tracks.length >= maxTracks || !playlist.has_continuation) break;
       playlist = await playlist.getContinuation();
@@ -180,7 +191,7 @@ async function resolvePlaylistTracks(session, playlistId, isMusic, { maxTracks =
     for (const item of items) {
       if (tracks.length >= maxTracks) break;
       if (!item.is_playable) continue; // skip private/deleted/region-locked placeholders
-      tracks.push({ videoId: item.id, isMusic: false, title: item.title?.text ?? item.id });
+      tracks.push({ videoId: item.id, isMusic: false, title: item.title?.text ?? item.id, duration: item.duration?.seconds ?? 0 });
     }
     if (tracks.length >= maxTracks || !playlist.has_continuation) break;
     playlist = await playlist.getContinuation();

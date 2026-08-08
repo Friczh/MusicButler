@@ -13,6 +13,7 @@ const commands = [
   new SlashCommandBuilder().setName('pause').setDescription('Pause playback'),
   new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
   new SlashCommandBuilder().setName('leave').setDescription('Leave the voice channel and clear the queue'),
+  new SlashCommandBuilder().setName('clearmessage').setDescription("Delete this bot's recent messages in this channel"),
   new SlashCommandBuilder()
     .setName('queue')
     .setDescription('Manage the queue')

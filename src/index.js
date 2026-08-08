@@ -6,6 +6,7 @@ const { QueueManager } = require('./lib/queueManager');
 const { PlayerManager } = require('./lib/player');
 const { waitForReady: waitForPotProvider } = require('./lib/potProvider');
 const { startHealthServer } = require('./lib/health');
+const { handlePanelInteraction } = require('./lib/panelInteractions');
 const { log } = require('./lib/log');
 
 const REQUIRED_ENV = ['DISCORD_TOKEN', 'YOUTUBE_COOKIES_BASE64'];
@@ -48,11 +49,11 @@ client.on('shardError', (err, id) => {
 });
 
 const queueManager = new QueueManager();
-const playerManager = new PlayerManager(queueManager);
+const playerManager = new PlayerManager(queueManager, client);
 const ctx = { queueManager, playerManager };
 
 const commandHandlers = new Collection();
-for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue']) {
+for (const file of ['play', 'skip', 'pause', 'resume', 'leave', 'queue', 'clearmessage']) {
   const handler = require(`./commands/${file}`);
   commandHandlers.set(handler.name, handler);
 }
@@ -82,19 +83,36 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  const handler = commandHandlers.get(interaction.commandName);
-  if (!handler) return;
+  if (interaction.isChatInputCommand()) {
+    const handler = commandHandlers.get(interaction.commandName);
+    if (!handler) return;
 
-  try {
-    await handler.execute(interaction, ctx);
-  } catch (err) {
-    console.error(`Error handling /${interaction.commandName}:`, err);
-    const payload = { content: 'Something went wrong running that command.', ephemeral: true };
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(payload).catch(() => {});
-    } else {
-      await interaction.reply(payload).catch(() => {});
+    try {
+      await handler.execute(interaction, ctx);
+    } catch (err) {
+      console.error(`Error handling /${interaction.commandName}:`, err);
+      const payload = { content: 'Something went wrong running that command.', ephemeral: true };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(payload).catch(() => {});
+      } else {
+        await interaction.reply(payload).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // Control-panel buttons (panel_*) and the Play modal submit.
+  if (interaction.isButton() || interaction.isModalSubmit()) {
+    try {
+      await handlePanelInteraction(interaction, ctx);
+    } catch (err) {
+      console.error('Error handling panel interaction:', err);
+      const payload = { content: 'Something went wrong.', ephemeral: true };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(payload).catch(() => {});
+      } else {
+        await interaction.reply(payload).catch(() => {});
+      }
     }
   }
 });

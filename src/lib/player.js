@@ -17,6 +17,8 @@ const { PrebufferTransform } = require('./prebuffer');
 const { buildOpusPipeline, buildTranscodedOpusPipeline } = require('./demuxPipeline');
 const { config } = require('./config');
 const { log } = require('./log');
+const { repostPanel, editPanelInPlace } = require('./panel');
+const { clearBotMessages } = require('./messageCleanup');
 
 // SabrStream itself throws this exact message internally when the server
 // sends a STREAM_PROTECTION_STATUS part with status 3 -- confirmed
@@ -40,9 +42,12 @@ function describeStreamError(err, usedSabr) {
 }
 
 class GuildPlayer {
-  constructor(guildId, queue) {
+  constructor(guildId, queue, client) {
     this.guildId = guildId;
     this.queue = queue;
+    // Needed for panel.js/messageCleanup.js, which operate on the text
+    // channel independent of the voice connection.
+    this.client = client;
     this.connection = null;
     this.audioPlayer = createAudioPlayer();
     // The abort() hook for whatever track is currently playing/being
@@ -97,6 +102,16 @@ class GuildPlayer {
   }
 
   disconnect() {
+    // Fire-and-forget: cleans up every bot message in the text channel
+    // (including the panel itself) on VC leave. Uses queue.textChannelId,
+    // which is NOT cleared by queue.clear() below, so it's still valid at
+    // this point. Errors are logged inside clearBotMessages, not thrown.
+    if (this.client && this.queue.textChannelId) {
+      clearBotMessages(this.client, this.queue.textChannelId).catch((err) =>
+        log.error(`player:${this.guildId}`, `panel cleanup on disconnect failed: ${err.message}`)
+      );
+    }
+    this.queue.panelMessageId = null;
     this.queue.bumpGeneration();
     this.queue.clear();
     this.audioPlayer.stop(true);
@@ -109,6 +124,11 @@ class GuildPlayer {
     this.queue.add(track);
     if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && !this.queue.playing) {
       await this._playNext();
+    } else {
+      // Something's already playing -- edit the panel's "up next" count
+      // in place rather than reposting (repost is reserved for actual
+      // track changes).
+      this._updatePanelInPlace();
     }
   }
 
@@ -118,7 +138,22 @@ class GuildPlayer {
     this.queue.addMany(tracks);
     if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && !this.queue.playing) {
       await this._playNext();
+    } else {
+      this._updatePanelInPlace();
     }
+  }
+
+  /** Fire-and-forget edit-in-place panel refresh; errors are logged, not thrown. */
+  _updatePanelInPlace() {
+    if (!this.client) return;
+    editPanelInPlace(this.client, this.queue, { isPaused: this.isPaused() }).catch((err) =>
+      log.error(`player:${this.guildId}`, `panel edit failed: ${err.message}`)
+    );
+  }
+
+  /** Public -- used by panelInteractions.js's pause/resume toggle button. */
+  isPaused() {
+    return this.audioPlayer.state.status === AudioPlayerStatus.Paused;
   }
 
   skip() {
@@ -130,11 +165,15 @@ class GuildPlayer {
   }
 
   pause() {
-    return this.audioPlayer.pause();
+    const ok = this.audioPlayer.pause();
+    if (ok) this._updatePanelInPlace();
+    return ok;
   }
 
   resume() {
-    return this.audioPlayer.unpause();
+    const ok = this.audioPlayer.unpause();
+    if (ok) this._updatePanelInPlace();
+    return ok;
   }
 
   /**
@@ -163,7 +202,12 @@ class GuildPlayer {
     this._abortActiveSabr();
 
     const track = this.queue.next();
-    if (!track) return;
+    if (!track) {
+      // Queue drained -- reflect idle state on the panel in place (not a
+      // track change, so no repost).
+      this._updatePanelInPlace();
+      return;
+    }
 
     const generation = this.queue.generation;
     let resource;
@@ -181,6 +225,15 @@ class GuildPlayer {
 
     log.debug(`player:${this.guildId}`, `now playing ${track.videoId}`);
     this.audioPlayer.play(resource);
+
+    // Track change -- delete the old panel and post a fresh one at the
+    // bottom of the channel, per the repost-on-track-change policy (keeps
+    // it from drifting off-screen in an active chat channel).
+    if (this.client) {
+      repostPanel(this.client, this.queue, { isPaused: false }).catch((err) =>
+        log.error(`player:${this.guildId}`, `panel repost failed: ${err.message}`)
+      );
+    }
   }
 
   /**
@@ -601,15 +654,16 @@ class GuildPlayer {
 }
 
 class PlayerManager {
-  constructor(queueManager) {
+  constructor(queueManager, client) {
     this.queueManager = queueManager;
+    this.client = client;
     /** @type {Map<string, GuildPlayer>} */
     this.players = new Map();
   }
 
   get(guildId) {
     if (!this.players.has(guildId)) {
-      this.players.set(guildId, new GuildPlayer(guildId, this.queueManager.get(guildId)));
+      this.players.set(guildId, new GuildPlayer(guildId, this.queueManager.get(guildId), this.client));
     }
     return this.players.get(guildId);
   }
