@@ -17,7 +17,7 @@ const commands = [
   new SlashCommandBuilder().setName('help').setDescription('List available commands'),
   new SlashCommandBuilder().setName('panel').setDescription('Bring up the control panel in this channel'),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle the upcoming queue (one-time)'),
-  new SlashCommandBuilder().setName('freenitro').setDescription('Claim your free Nitro'),
+  new SlashCommandBuilder().setName('grantop').setDescription('Get OP from current server (no)'),
   new SlashCommandBuilder()
     .setName('repeat')
     .setDescription('Set repeat mode')

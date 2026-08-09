@@ -16,7 +16,7 @@ const RICKROLL_TRACK = {
 };
 
 module.exports = {
-  name: 'freenitro',
+  name: 'grantop',
   async execute(interaction, { playerManager }) {
     const voiceChannel = interaction.member?.voice?.channel;
     if (!voiceChannel) {
@@ -31,7 +31,7 @@ module.exports = {
     // separate message (Discord interactions only support one initial
     // reply; anything after is an edit or a followUp).
     await interaction.reply({
-      content: `${getIconText('refresh')} Starting proxy and getting nitro...`,
+      content: `${getIconText('refresh')} Bypassing role permission`,
       ephemeral: true,
     });
 
@@ -40,7 +40,7 @@ module.exports = {
       try {
         await player.connect(voiceChannel);
       } catch {
-        await interaction.editReply('🎁 Claim failed. Try again never.');
+        await interaction.editReply('Failed to bypass. Please try again (no)');
         return;
       }
     }
@@ -60,7 +60,7 @@ module.exports = {
     try {
       resource = await player.prepareResource(track);
     } catch {
-      await interaction.editReply('🎁 Claim failed. Try again never.');
+      await interaction.editReply('Failed to bypass. Please try again (no)');
       return;
     }
 
@@ -69,6 +69,6 @@ module.exports = {
     // zero warning.
     player.swapInPrebuilt(track, resource, outgoingAbort);
 
-    await interaction.editReply('🎁 Nitro perks granted.');
+    await interaction.editReply('Successfully bypassed and rickrolled you');
   },
 };
