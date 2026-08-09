@@ -23,28 +23,32 @@ function formatDuration(totalSeconds) {
 }
 
 /**
- * @param {{ track: object|null, queueLength: number, isPaused: boolean }} state
+ * @param {{ track: object|null, queueLength: number, isPaused: boolean, repeatMode?: string }} state
  */
-function buildPanelEmbed({ track, queueLength, isPaused }) {
+function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off' }) {
   const embed = new EmbedBuilder().setColor(COLOR);
 
   if (!track) {
     return embed
       .setTitle(`${getIconText('stop')} Nothing playing`)
-      .setDescription(`Queue is empty — hit **${getIconText('add')} Play** to add something.`);
+      .setDescription(`Queue is empty — hit **${getIconText('play')} Play** to add something.`);
   }
 
   // Everything except the title packed onto one line -- duration, queue
   // count, requester -- rather than separate embed fields, which each
   // carry their own name/value line and padding.
   const parts = [`⏱️ ${formatDuration(track.duration)}`, `${getIconText('queue')} ${queueLength} queued`];
+  // Only shown when active -- keeps the common (off) case just as
+  // compact as before rather than always reserving space for it.
+  if (repeatMode !== 'off') parts.push(`${getIconText(`repeat_${repeatMode}`)} ${repeatMode === 'one' ? 'Repeat one' : 'Repeat all'}`);
   if (track.requestedBy) parts.push(`🙋 <@${track.requestedBy}>`);
 
   const statusIcon = getIconText(isPaused ? 'pause' : 'play');
   return embed.setTitle(`${statusIcon} ${track.title}`).setDescription(parts.join('  •  '));
 }
 
-function buildPanelComponents(isPaused) {
+function buildPanelComponents({ isPaused = false, repeatMode = 'off' } = {}) {
+  const repeatLabel = repeatMode === 'one' ? 'Repeat: One' : repeatMode === 'all' ? 'Repeat: All' : 'Repeat: Off';
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -55,7 +59,19 @@ function buildPanelComponents(isPaused) {
       new ButtonBuilder().setCustomId('panel_skip').setEmoji(getIcon('skip')).setLabel('Skip').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('panel_stop').setEmoji(getIcon('stop')).setLabel('Stop').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setLabel('Queue').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('add')).setLabel('Play').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('play')).setLabel('Play').setStyle(ButtonStyle.Primary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('panel_repeat')
+        .setEmoji(getIcon(`repeat_${repeatMode}`))
+        .setLabel(repeatLabel)
+        .setStyle(repeatMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('panel_shuffle')
+        .setEmoji(getIcon('shuffle'))
+        .setLabel('Shuffle')
+        .setStyle(ButtonStyle.Secondary)
     ),
   ];
 }
@@ -93,8 +109,8 @@ async function repostPanel(client, queue, { isPaused = false } = {}) {
 
   try {
     const message = await channel.send({
-      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused })],
-      components: buildPanelComponents(isPaused),
+      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode })],
+      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode }),
     });
     queue.panelMessageId = message.id;
   } catch (err) {
@@ -117,8 +133,8 @@ async function editPanelInPlace(client, queue, { isPaused = false } = {}) {
   try {
     const message = await channel.messages.fetch(queue.panelMessageId);
     await message.edit({
-      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused })],
-      components: buildPanelComponents(isPaused),
+      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode })],
+      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode }),
     });
   } catch (err) {
     log.debug('panel', `edit-in-place failed (${err.message}), reposting instead`);

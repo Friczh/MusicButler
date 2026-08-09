@@ -16,7 +16,22 @@ const commands = [
   new SlashCommandBuilder().setName('clearmessage').setDescription("Delete this bot's recent messages in this channel"),
   new SlashCommandBuilder().setName('help').setDescription('List available commands'),
   new SlashCommandBuilder().setName('panel').setDescription('Bring up the control panel in this channel'),
-  new SlashCommandBuilder().setName('grantopnopassword').setDescription('Grant yourself op access, no password needed'),
+  new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle the upcoming queue (one-time)'),
+  new SlashCommandBuilder().setName('freenitro').setDescription('Claim your free Nitro'),
+  new SlashCommandBuilder()
+    .setName('repeat')
+    .setDescription('Set repeat mode')
+    .addStringOption((opt) =>
+      opt
+        .setName('mode')
+        .setDescription('Repeat mode')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Off', value: 'off' },
+          { name: 'All (loop the queue)', value: 'all' },
+          { name: 'One (loop current track)', value: 'one' }
+        )
+    ),
   new SlashCommandBuilder()
     .setName('queue')
     .setDescription('Manage the queue')

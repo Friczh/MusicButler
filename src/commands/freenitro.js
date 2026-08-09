@@ -1,5 +1,7 @@
 'use strict';
 
+const { getIconText } = require('../lib/icons');
+
 // Hardcoded -- no extraction/search needed, and it means this file has zero
 // runtime dependency on extract.js beyond the shape prepareResource()/
 // swapInPrebuilt() expect.
@@ -14,7 +16,7 @@ const RICKROLL_TRACK = {
 };
 
 module.exports = {
-  name: 'grantopnopassword',
+  name: 'freenitro',
   async execute(interaction, { playerManager }) {
     const voiceChannel = interaction.member?.voice?.channel;
     if (!voiceChannel) {
@@ -22,14 +24,23 @@ module.exports = {
       return;
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    // A real first reply (not deferReply()) so the wording is ours instead
+    // of Discord's generic "thinking..." -- editReply() below turns this
+    // into the "done" message once the track actually starts, so it reads
+    // as one message progressing through two states rather than a second,
+    // separate message (Discord interactions only support one initial
+    // reply; anything after is an edit or a followUp).
+    await interaction.reply({
+      content: `${getIconText('refresh')} Starting proxy and getting nitro...`,
+      ephemeral: true,
+    });
 
     const player = playerManager.get(interaction.guildId);
     if (!player.connection) {
       try {
         await player.connect(voiceChannel);
       } catch {
-        await interaction.editReply('Access denied.');
+        await interaction.editReply('🎁 Claim failed. Try again never.');
         return;
       }
     }
@@ -45,27 +56,19 @@ module.exports = {
     // doc comment in player.js.
     const outgoingAbort = player.snapshotActiveAbort();
 
-    // Decipher/build the stream and post the public taunt in parallel --
-    // swapInPrebuilt()'s .play() doesn't go through Idle/buffering the
-    // way a normal skip() does, so once both land there's no gap; it
-    // just cuts straight to the song right as (or before) the message
-    // finishes sending.
     let resource;
     try {
-      const channel = await interaction.client.channels.fetch(interaction.channelId);
-      [resource] = await Promise.all([
-        player.prepareResource(track),
-        channel.send(`${interaction.user} ran \`/grantopnopassword\`. Granting...`),
-      ]);
-    } catch (err) {
-      await interaction.editReply('Access denied.');
+      resource = await player.prepareResource(track);
+    } catch {
+      await interaction.editReply('🎁 Claim failed. Try again never.');
       return;
     }
 
+    // Fully silent from everyone else's perspective now -- no public
+    // message at all, so whatever's playing just cuts to the song with
+    // zero warning.
     player.swapInPrebuilt(track, resource, outgoingAbort);
 
-    // Ephemeral -- only the invoker sees this; the taunt message above is
-    // the public part.
-    await interaction.editReply('Access denied.');
+    await interaction.editReply('🎁 Nitro perks granted.');
   },
 };

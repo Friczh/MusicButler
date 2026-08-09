@@ -60,8 +60,8 @@ async function handlePanelInteraction(interaction, ctx) {
         // responds within Discord's 3s ack window without waiting on it.
         const isPaused = !wasPaused;
         await interaction.update({
-          embeds: [buildPanelEmbed({ track: player.queue.playing, queueLength: player.queue.list().length, isPaused })],
-          components: buildPanelComponents(isPaused),
+          embeds: [buildPanelEmbed({ track: player.queue.playing, queueLength: player.queue.list().length, isPaused, repeatMode: player.queue.repeatMode })],
+          components: buildPanelComponents({ isPaused, repeatMode: player.queue.repeatMode }),
         });
         return true;
       }
@@ -110,6 +110,31 @@ async function handlePanelInteraction(interaction, ctx) {
           .setRequired(true);
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
+        return true;
+      }
+
+      case 'panel_repeat': {
+        const mode = player.queue.cycleRepeatMode();
+        await interaction.update({
+          embeds: [
+            buildPanelEmbed({
+              track: player.queue.playing,
+              queueLength: player.queue.list().length,
+              isPaused: player.isPaused(),
+              repeatMode: mode,
+            }),
+          ],
+          components: buildPanelComponents({ isPaused: player.isPaused(), repeatMode: mode }),
+        });
+        return true;
+      }
+
+      case 'panel_shuffle': {
+        const n = player.queue.shuffle();
+        // Ephemeral, like the Queue button -- a one-time action, no
+        // persistent state to reflect on the panel itself.
+        const { shuffleReplyText } = require('../commands/shuffle');
+        await interaction.reply({ content: shuffleReplyText(n), ephemeral: true });
         return true;
       }
 

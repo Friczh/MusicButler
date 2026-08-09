@@ -58,18 +58,29 @@ class GuildPlayer {
     // ReadableStream -- confirmed against installed googlevideo source);
     // only calling .abort() on the SabrStream instance itself does.
     this._activeAbort = null;
+    // Set by skip() right before forcing Idle, read (and cleared) by the
+    // Idle listener below -- lets _playNext() tell a manual skip apart
+    // from a natural track-end, which matters for repeat-one (a manual
+    // skip should always advance, not replay the same track).
+    this._pendingManualSkip = false;
     this._wireAudioPlayerEvents();
   }
 
   _wireAudioPlayerEvents() {
     this.audioPlayer.on(AudioPlayerStatus.Idle, () => {
-      this._playNext().catch((err) =>
+      const manualSkip = this._pendingManualSkip;
+      this._pendingManualSkip = false;
+      this._playNext({ manualSkip }).catch((err) =>
         console.error(`[player:${this.guildId}] playNext failed:`, err.message)
       );
     });
     this.audioPlayer.on('error', (err) => {
       console.error(`[player:${this.guildId}] audio player error:`, err.message);
-      this._playNext().catch((e) =>
+      // isError: true -- never honor repeat-one/repeat-all for a track
+      // that just failed, or a bad track would retry (repeat-one) or
+      // keep cycling back around (repeat-all) forever. Same reasoning as
+      // the "don't let one bad track wedge the queue" comment below.
+      this._playNext({ isError: true }).catch((e) =>
         console.error(`[player:${this.guildId}] playNext after error failed:`, e.message)
       );
     });
@@ -127,7 +138,7 @@ class GuildPlayer {
     } else {
       // Something's already playing -- edit the panel's "up next" count
       // in place rather than reposting (repost is reserved for actual
-      // track changes). Skip entirely for a silent track (grantopnopassword
+      // track changes). Skip entirely for a silent track (freenitro
       // easter egg) -- it must not surface anywhere.
       if (!track.silent) this._updatePanelInPlace();
     }
@@ -159,7 +170,7 @@ class GuildPlayer {
   /**
    * Resolves+deciphers `track` into a playable resource without touching
    * the queue or audioPlayer -- lets a caller build a resource ahead of
-   * time (in parallel with something else, e.g. grantopnopassword's
+   * time (in parallel with something else, e.g. freenitro's
    * public taunt message) and swap it in later via swapInPrebuilt().
    */
   async prepareResource(track) {
@@ -205,6 +216,11 @@ class GuildPlayer {
     );
   }
 
+  /** Public -- used by commands (e.g. /repeat) that change queue state without an interaction bound to the panel message itself. */
+  refreshPanel() {
+    this._updatePanelInPlace();
+  }
+
   /** Public -- used by panelInteractions.js's pause/resume toggle button. */
   isPaused() {
     return this.audioPlayer.state.status === AudioPlayerStatus.Paused;
@@ -215,6 +231,9 @@ class GuildPlayer {
     // slow resolve that finishes after this call can't clobber whatever the
     // Idle handler starts next.
     this.queue.bumpGeneration();
+    // Read by the Idle listener -- a manual skip always advances past
+    // repeat-one instead of replaying the current track.
+    this._pendingManualSkip = true;
     this.audioPlayer.stop(true);
   }
 
@@ -247,7 +266,7 @@ class GuildPlayer {
     } catch { /* already finished/aborted -- nothing to clean up */ }
   }
 
-  async _playNext() {
+  async _playNext({ manualSkip = false, isError = false } = {}) {
     // Always runs first, unconditionally -- whether this call came from
     // a natural track-end (Idle), an error, skip(), or disconnect()'s
     // queue-clear, whatever SABR fetch loop the PREVIOUS track owned
@@ -255,7 +274,27 @@ class GuildPlayer {
     // _abortActiveSabr().
     this._abortActiveSabr();
 
-    const track = this.queue.next();
+    const finished = this.queue.playing;
+    let track;
+
+    if (finished && !finished.silent && this.queue.repeatMode === 'one' && !manualSkip && !isError) {
+      // Repeat-one, and this wasn't a manual skip or a failure -- replay
+      // the same track object instead of pulling from the queue. Always
+      // re-extracted from scratch (no seek/position tracking anywhere in
+      // this codebase), same as a normal replay.
+      track = finished;
+    } else {
+      if (finished && !finished.silent && this.queue.repeatMode === 'all' && !isError) {
+        // Repeat-all -- the just-finished track goes to the BACK of the
+        // queue rather than being discarded, so the whole queue cycles
+        // instead of shrinking to nothing. (Skipped tracks get requeued
+        // here too, same as a natural end -- that's how "loop the queue"
+        // is expected to behave.)
+        this.queue.tracks.push(finished);
+      }
+      track = this.queue.next();
+    }
+
     if (!track) {
       // Queue drained -- reflect idle state on the panel in place (not a
       // track change, so no repost).
@@ -270,7 +309,7 @@ class GuildPlayer {
     } catch (err) {
       console.error(`[player:${this.guildId}] extraction failed for ${track.videoId}:`, err.message);
       if (this.queue.isCurrentGeneration(generation)) {
-        return this._playNext(); // don't let one bad track wedge the queue
+        return this._playNext({ isError: true }); // don't let one bad track wedge the queue
       }
       return;
     }
@@ -283,7 +322,7 @@ class GuildPlayer {
     // Track change -- delete the old panel and post a fresh one at the
     // bottom of the channel, per the repost-on-track-change policy (keeps
     // it from drifting off-screen in an active chat channel). Skipped for
-    // a silent track (grantopnopassword easter egg) -- no panel, no
+    // a silent track (freenitro easter egg) -- no panel, no
     // notification, nothing.
     if (this.client && !track.silent) {
       repostPanel(this.client, this.queue, { isPaused: false }).catch((err) =>

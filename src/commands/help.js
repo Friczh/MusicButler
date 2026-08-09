@@ -3,7 +3,7 @@
 const { EmbedBuilder } = require('discord.js');
 
 // Maintained by hand rather than derived from commandDefs.js -- deliberate,
-// so grantopnopassword never shows up here no matter what gets added to
+// so freenitro never shows up here no matter what gets added to
 // the command list later.
 const ENTRIES = [
   ['/play <query>', 'Play a YouTube/YouTube Music URL or search query'],
@@ -16,6 +16,8 @@ const ENTRIES = [
   ['/queue swap <a> <b>', 'Swap two tracks by position'],
   ['/queue move <from> <to>', 'Move a track to a new position'],
   ['/queue clear', 'Clear the queue'],
+  ['/repeat <mode>', 'Set repeat mode: off, all, or one'],
+  ['/shuffle', 'Shuffle the upcoming queue (one-time)'],
   ['/clearmessage', "Delete this bot's recent messages in this channel"],
   ['/panel', 'Bring up the control panel in this channel'],
   ['/help', 'Show this list'],

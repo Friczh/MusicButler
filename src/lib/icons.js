@@ -12,13 +12,9 @@ const FALLBACK = {
   skip: '⏭️',
   stop: '⏹️',
   queue: '📜',
-  add: '➕',
   back: '⏮️',
   refresh: '🔄',
-  // Not wired into any UI yet -- uploaded ahead of the shuffle/repeat
-  // feature so the icons are ready when that's built.
-  shuffle_on: '🔀',
-  shuffle_off: '🔀',
+  shuffle: '🔀',
   repeat_all: '🔁',
   repeat_one: '🔂',
   repeat_off: '🔁',

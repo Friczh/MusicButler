@@ -1,5 +1,7 @@
 'use strict';
 
+const REPEAT_MODES = ['off', 'all', 'one'];
+
 class GuildQueue {
   constructor(guildId) {
     this.guildId = guildId;
@@ -16,6 +18,10 @@ class GuildQueue {
     // any -- see panel.js. Repost-on-track-change replaces this; leaving/
     // /clearmessage clears it out via messageCleanup.js.
     this.panelMessageId = null;
+    // 'off' | 'all' (loop the whole queue, including whatever's currently
+    // playing) | 'one' (loop just the current track) -- honored in
+    // player.js's _playNext().
+    this.repeatMode = 'off';
   }
 
   add(track) {
@@ -68,6 +74,15 @@ class GuildQueue {
     return true;
   }
 
+  /** Randomizes the order of upcoming tracks -- a one-time action, not a persistent mode. Returns the resulting track count. */
+  shuffle() {
+    for (let i = this.tracks.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [this.tracks[i], this.tracks[j]] = [this.tracks[j], this.tracks[i]];
+    }
+    return this.tracks.length;
+  }
+
   clear() {
     this.tracks = [];
   }
@@ -83,6 +98,19 @@ class GuildQueue {
 
   isCurrentGeneration(gen) {
     return gen === this.generation;
+  }
+
+  /** Sets repeat mode; ignores an invalid value rather than throwing. Returns the resulting mode. */
+  setRepeatMode(mode) {
+    if (REPEAT_MODES.includes(mode)) this.repeatMode = mode;
+    return this.repeatMode;
+  }
+
+  /** Advances to the next mode in off -> all -> one -> off order. Used by the panel's repeat button. */
+  cycleRepeatMode() {
+    const idx = REPEAT_MODES.indexOf(this.repeatMode);
+    this.repeatMode = REPEAT_MODES[(idx + 1) % REPEAT_MODES.length];
+    return this.repeatMode;
   }
 }
 
@@ -108,4 +136,4 @@ class QueueManager {
   }
 }
 
-module.exports = { QueueManager, GuildQueue };
+module.exports = { QueueManager, GuildQueue, REPEAT_MODES };
