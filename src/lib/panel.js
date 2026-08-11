@@ -9,6 +9,7 @@ const {
 } = require('discord.js');
 const { log } = require('./log');
 const { getIcon, getIconText } = require('./icons');
+const { config } = require('./config');
 
 const COLOR = 0x5865f2;
 
@@ -30,9 +31,12 @@ function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off', shu
   const embed = new EmbedBuilder().setColor(COLOR);
 
   if (!track) {
+    const idleLine = config.idleTimeoutMin > 0
+      ? `\n\n⏱️ Auto-leaving after ${config.idleTimeoutMin} min idle.`
+      : '';
     return embed
       .setTitle(`${getIconText('stop')} Nothing playing`)
-      .setDescription(`Queue is empty — hit **${getIconText('play')} Play** to add something.`);
+      .setDescription(`Queue is empty — hit **${getIconText('play')} Play** to add something.${idleLine}`);
   }
 
   // Everything except the title packed onto one line -- duration, queue
@@ -51,6 +55,7 @@ function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off', shu
 
 function buildPanelComponents({ isPaused = false, repeatMode = 'off', shuffleActive = false } = {}) {
   return [
+    // Playback controls
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('panel_pauseresume')
@@ -58,10 +63,11 @@ function buildPanelComponents({ isPaused = false, repeatMode = 'off', shuffleAct
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('panel_skip').setEmoji(getIcon('skip')).setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('panel_stop').setEmoji(getIcon('stop')).setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('play')).setStyle(ButtonStyle.Primary)
     ),
+    // Queue / mode controls
     new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId('panel_repeat')
         .setEmoji(getIcon(`repeat_${repeatMode}`))

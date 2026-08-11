@@ -40,6 +40,15 @@ const config = {
   // resolved playlist longer than this is truncated, not rejected.
   playlistMaxTracks: envNumber('MB_PLAYLIST_MAX_TRACKS', 500),
 
+  // Auto-exit timer (minutes) -- shared duration for two independent
+  // timers (see GuildPlayer in player.js): the "alone in VC" timer
+  // (starts when the last human leaves; cancelled, not reset, if someone
+  // rejoins) and the "idle" timer (starts whenever nothing is playing --
+  // paused or queue drained; only cleared by actual playback resuming,
+  // never by VC population changes). Whichever fires first disconnects.
+  // 0 disables both.
+  idleTimeoutMin: envNumber('MB_IDLE_TIMEOUT_MIN', 5),
+
   get stallBufferFrames() {
     return Math.max(1, Math.round(this.stallBufferMs / OPUS_FRAME_MS));
   },

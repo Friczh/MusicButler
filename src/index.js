@@ -131,7 +131,10 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.on('voiceStateUpdate', (oldState, newState) => {
-  // Auto-leave when the bot ends up alone in a voice channel.
+  // Reflects VC population changes to the player -- pauses + starts an
+  // auto-exit countdown when the bot ends up alone (see
+  // GuildPlayer.handleVoicePopulationChange()), cancels that countdown
+  // (without auto-resuming) if a human rejoins in time.
   const guildId = oldState.guild.id;
   if (!playerManager.has(guildId)) return;
   const player = playerManager.get(guildId);
@@ -140,9 +143,7 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   const channel = oldState.guild.channels.cache.get(channelId);
   if (!channel) return;
   const humanMembers = channel.members.filter((m) => !m.user.bot);
-  if (humanMembers.size === 0) {
-    playerManager.delete(guildId);
-  }
+  player.handleVoicePopulationChange(humanMembers.size === 0);
 });
 
 log.debug('discord', 'connecting to Discord gateway...');

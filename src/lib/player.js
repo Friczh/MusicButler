@@ -42,12 +42,17 @@ function describeStreamError(err, usedSabr) {
 }
 
 class GuildPlayer {
-  constructor(guildId, queue, client) {
+  constructor(guildId, queue, client, onIdleTimeout = null) {
     this.guildId = guildId;
     this.queue = queue;
     // Needed for panel.js/messageCleanup.js, which operate on the text
     // channel independent of the voice connection.
     this.client = client;
+    // Called when either timer below fires -- set by PlayerManager to a
+    // closure that fully tears the player down AND removes it from
+    // PlayerManager's map (disconnect() alone only handles the
+    // connection/queue side, same as it always has for /leave etc.).
+    this._onIdleTimeout = onIdleTimeout;
     this.connection = null;
     this.audioPlayer = createAudioPlayer();
     // The abort() hook for whatever track is currently playing/being
@@ -63,6 +68,16 @@ class GuildPlayer {
     // from a natural track-end, which matters for repeat-one (a manual
     // skip should always advance, not replay the same track).
     this._pendingManualSkip = false;
+    // "Alone in VC" timer -- see handleVoicePopulationChange(). Kept
+    // separate from _idleTimer below (they start independently -- the
+    // channel being empty doesn't itself mean playback is idle if a
+    // track happens to still be resolving/playing when the last human
+    // leaves, which is why pause() is called explicitly at that point).
+    // On rejoin, though, handleVoicePopulationChange() clears BOTH --
+    // see that method for why.
+    this._aloneTimer = null;
+    // "Nothing playing" timer -- see _startIdleTimer()/_clearIdleTimer().
+    this._idleTimer = null;
     this._wireAudioPlayerEvents();
   }
 
@@ -93,6 +108,73 @@ class GuildPlayer {
     });
   }
 
+  // --- Auto-exit timers -------------------------------------------------
+  // Two independent timers, sharing one configured duration
+  // (config.idleTimeoutMin) but never resetting/cancelling each other.
+  // Whichever fires first tears the whole player down.
+
+  _fireTimeout(reason) {
+    this._clearAloneTimer();
+    this._clearIdleTimer();
+    log.debug(`player:${this.guildId}`, `auto-exit: ${reason} timeout elapsed`);
+    this._onIdleTimeout?.();
+  }
+
+  _startAloneTimer() {
+    if (this._aloneTimer || config.idleTimeoutMin <= 0) return;
+    this._aloneTimer = setTimeout(() => this._fireTimeout('alone'), config.idleTimeoutMin * 60_000);
+  }
+
+  _clearAloneTimer() {
+    if (!this._aloneTimer) return;
+    clearTimeout(this._aloneTimer);
+    this._aloneTimer = null;
+  }
+
+  _startIdleTimer() {
+    if (this._idleTimer || config.idleTimeoutMin <= 0) return;
+    this._idleTimer = setTimeout(() => this._fireTimeout('idle'), config.idleTimeoutMin * 60_000);
+  }
+
+  _clearIdleTimer() {
+    if (!this._idleTimer) return;
+    clearTimeout(this._idleTimer);
+    this._idleTimer = null;
+  }
+
+  /**
+   * Called from index.js's voiceStateUpdate handler on every population
+   * change in the bot's voice channel. `isEmpty` is whether any humans
+   * remain.
+   *
+   * Deliberately does NOT reset/restart an already-running alone timer on
+   * repeated "still empty" events (guarded by `if (this._aloneTimer)
+   * return` in _startAloneTimer()).
+   *
+   * On rejoin, BOTH timers are cleared -- a human coming back cancels the
+   * alone countdown (obviously) AND any independently-running idle
+   * countdown (e.g. one left over from an earlier pause/queue-drain
+   * before everyone left). Without this, a silent rejoin (someone comes
+   * back but doesn't hit Resume) could still get auto-kicked by the idle
+   * timer expiring underneath them, which defeats the point of coming
+   * back.
+   */
+  handleVoicePopulationChange(isEmpty) {
+    if (isEmpty) {
+      if (this._aloneTimer) return; // already counting down
+      this.pause();
+      this._startAloneTimer();
+    } else {
+      // Cancelled, not resumed -- playback stays paused until someone
+      // explicitly hits Resume/Play. Both timers are reset here so
+      // rejoining fully clears any pending auto-exit, not just the
+      // alone-specific one.
+      this._clearAloneTimer();
+      this._clearIdleTimer();
+    }
+  }
+
+
   async connect(voiceChannel) {
     log.debug(`player:${this.guildId}`, `joining voice channel ${voiceChannel.id}`);
     this.connection = joinVoiceChannel({
@@ -113,6 +195,8 @@ class GuildPlayer {
   }
 
   disconnect() {
+    this._clearAloneTimer();
+    this._clearIdleTimer();
     // Fire-and-forget: cleans up every bot message in the text channel
     // (including the panel itself) on VC leave. Uses queue.textChannelId,
     // which is NOT cleared by queue.clear() below, so it's still valid at
@@ -205,6 +289,7 @@ class GuildPlayer {
     // skip() that happened to fire around the same moment) so it can't
     // land after this swap and clobber it.
     this.queue.bumpGeneration();
+    this._clearIdleTimer();
     this.audioPlayer.play(resource);
   }
 
@@ -239,13 +324,19 @@ class GuildPlayer {
 
   pause() {
     const ok = this.audioPlayer.pause();
-    if (ok) this._updatePanelInPlace();
+    if (ok) {
+      this._startIdleTimer();
+      this._updatePanelInPlace();
+    }
     return ok;
   }
 
   resume() {
     const ok = this.audioPlayer.unpause();
-    if (ok) this._updatePanelInPlace();
+    if (ok) {
+      this._clearIdleTimer();
+      this._updatePanelInPlace();
+    }
     return ok;
   }
 
@@ -302,7 +393,9 @@ class GuildPlayer {
 
     if (!track) {
       // Queue drained -- reflect idle state on the panel in place (not a
-      // track change, so no repost).
+      // track change, so no repost), and start the idle auto-exit timer
+      // (see _startIdleTimer() -- no-ops if already running or disabled).
+      this._startIdleTimer();
       this._updatePanelInPlace();
       return;
     }
@@ -322,6 +415,7 @@ class GuildPlayer {
     if (!this.queue.isCurrentGeneration(generation)) return; // stale result, drop it
 
     log.debug(`player:${this.guildId}`, `now playing ${track.videoId}`);
+    this._clearIdleTimer();
     this.audioPlayer.play(resource);
 
     // Track change -- delete the old panel and post a fresh one at the
@@ -763,7 +857,8 @@ class PlayerManager {
 
   get(guildId) {
     if (!this.players.has(guildId)) {
-      this.players.set(guildId, new GuildPlayer(guildId, this.queueManager.get(guildId), this.client));
+      const player = new GuildPlayer(guildId, this.queueManager.get(guildId), this.client, () => this.delete(guildId));
+      this.players.set(guildId, player);
     }
     return this.players.get(guildId);
   }
