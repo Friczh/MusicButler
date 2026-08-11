@@ -16,7 +16,7 @@ const commands = [
   new SlashCommandBuilder().setName('clearmessage').setDescription("Delete this bot's recent messages in this channel"),
   new SlashCommandBuilder().setName('help').setDescription('List available commands'),
   new SlashCommandBuilder().setName('panel').setDescription('Bring up the control panel in this channel'),
-  new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle the upcoming queue (one-time)'),
+  new SlashCommandBuilder().setName('shuffle').setDescription('Toggle shuffle on/off for the upcoming queue'),
   new SlashCommandBuilder().setName('grantop').setDescription('Get OP from current server (no)'),
   new SlashCommandBuilder()
     .setName('repeat')

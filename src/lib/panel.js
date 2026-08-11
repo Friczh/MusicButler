@@ -24,9 +24,9 @@ function formatDuration(totalSeconds) {
 }
 
 /**
- * @param {{ track: object|null, queueLength: number, isPaused: boolean, repeatMode?: string }} state
+ * @param {{ track: object|null, queueLength: number, isPaused: boolean, repeatMode?: string, shuffleActive?: boolean }} state
  */
-function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off' }) {
+function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off', shuffleActive = false }) {
   const embed = new EmbedBuilder().setColor(COLOR);
 
   if (!track) {
@@ -42,36 +42,33 @@ function buildPanelEmbed({ track, queueLength, isPaused, repeatMode = 'off' }) {
   // Only shown when active -- keeps the common (off) case just as
   // compact as before rather than always reserving space for it.
   if (repeatMode !== 'off') parts.push(`${getIconText(`repeat_${repeatMode}`)} ${repeatMode === 'one' ? 'Repeat one' : 'Repeat all'}`);
+  if (shuffleActive) parts.push(`${getIconText('shuffle_on')} Shuffle on`);
   if (track.requestedBy) parts.push(`🙋 <@${track.requestedBy}>`);
 
   const statusIcon = getIconText(isPaused ? 'pause' : 'play');
   return embed.setTitle(`${statusIcon} ${track.title}`).setDescription(parts.join('  •  '));
 }
 
-function buildPanelComponents({ isPaused = false, repeatMode = 'off' } = {}) {
-  const repeatLabel = repeatMode === 'one' ? 'Repeat: One' : repeatMode === 'all' ? 'Repeat: All' : 'Repeat: Off';
+function buildPanelComponents({ isPaused = false, repeatMode = 'off', shuffleActive = false } = {}) {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('panel_pauseresume')
         .setEmoji(getIcon(isPaused ? 'play' : 'pause'))
-        .setLabel(isPaused ? 'Resume' : 'Pause')
         .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_skip').setEmoji(getIcon('skip')).setLabel('Skip').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_stop').setEmoji(getIcon('stop')).setLabel('Stop').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setLabel('Queue').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('play')).setLabel('Play').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('panel_skip').setEmoji(getIcon('skip')).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('panel_stop').setEmoji(getIcon('stop')).setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('panel_queue').setEmoji(getIcon('queue')).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('panel_play').setEmoji(getIcon('play')).setStyle(ButtonStyle.Primary)
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('panel_repeat')
         .setEmoji(getIcon(`repeat_${repeatMode}`))
-        .setLabel(repeatLabel)
         .setStyle(repeatMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId('panel_shuffle')
-        .setEmoji(getIcon('shuffle'))
-        .setLabel('Shuffle')
+        .setEmoji(getIcon(shuffleActive ? 'shuffle_on' : 'shuffle_off'))
         .setStyle(ButtonStyle.Secondary)
     ),
   ];
@@ -110,8 +107,8 @@ async function repostPanel(client, queue, { isPaused = false } = {}) {
 
   try {
     const message = await channel.send({
-      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode })],
-      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode }),
+      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode, shuffleActive: queue.shuffleActive })],
+      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode, shuffleActive: queue.shuffleActive }),
       // Public, not ephemeral -- everyone in the channel needs to see and
       // use it -- but silent, since this fires on every track change and
       // was the original motivating complaint (VC flooded with
@@ -139,8 +136,8 @@ async function editPanelInPlace(client, queue, { isPaused = false } = {}) {
   try {
     const message = await channel.messages.fetch(queue.panelMessageId);
     await message.edit({
-      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode })],
-      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode }),
+      embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode, shuffleActive: queue.shuffleActive })],
+      components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode, shuffleActive: queue.shuffleActive }),
     });
   } catch (err) {
     log.debug('panel', `edit-in-place failed (${err.message}), reposting instead`);

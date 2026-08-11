@@ -17,7 +17,7 @@ const ENTRIES = [
   ['/queue move <from> <to>', 'Move a track to a new position'],
   ['/queue clear', 'Clear the queue'],
   ['/repeat <mode>', 'Set repeat mode: off, all, or one'],
-  ['/shuffle', 'Shuffle the upcoming queue (one-time)'],
+  ['/shuffle', 'Toggle shuffle on/off for the upcoming queue'],
   ['/seticons', 'Re-upload the icon set from bundled assets (Manage Server only)'],
   ['/clearmessage', "Delete this bot's recent messages in this channel"],
   ['/panel', 'Bring up the control panel in this channel'],

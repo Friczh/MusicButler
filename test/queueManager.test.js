@@ -127,3 +127,67 @@ test('QueueManager.delete removes the queue', () => {
   mgr.delete('guildA');
   assert.equal(mgr.has('guildA'), false);
 });
+
+test('toggleShuffle: on shuffles, off restores the pre-shuffle order', () => {
+  const q = new GuildQueue('g1');
+  const tracks = ['a', 'b', 'c', 'd', 'e'].map(track);
+  q.addMany(tracks);
+  const before = q.list();
+
+  const on = q.toggleShuffle();
+  assert.equal(on.active, true);
+  assert.equal(on.count, 5);
+  assert.equal(q.shuffleActive, true);
+
+  const off = q.toggleShuffle();
+  assert.equal(off.active, false);
+  assert.equal(q.shuffleActive, false);
+  assert.deepEqual(q.list(), before);
+});
+
+test('toggleShuffle: a second on-cycle reshuffles (order need not repeat)', () => {
+  const q = new GuildQueue('g1');
+  q.addMany(Array.from({ length: 20 }, (_, i) => track(String(i))));
+  q.toggleShuffle();
+  const firstShuffle = q.list();
+  q.toggleShuffle(); // off, back to original
+  q.toggleShuffle(); // on again
+  const secondShuffle = q.list();
+  assert.notDeepEqual(firstShuffle, secondShuffle);
+});
+
+test('toggleShuffle: restore reconciles tracks removed while shuffled', () => {
+  const q = new GuildQueue('g1');
+  q.addMany(['a', 'b', 'c', 'd'].map(track));
+  q.toggleShuffle();
+  q.remove(0); // remove whatever ended up first post-shuffle
+  const off = q.toggleShuffle();
+  assert.equal(off.count, 3);
+  assert.deepEqual(
+    q.list().map((t) => t.videoId).sort(),
+    ['a', 'b', 'c', 'd'].filter((id) => q.list().some((t) => t.videoId === id)).sort()
+  );
+  // Surviving tracks keep their original relative order.
+  const ids = q.list().map((t) => t.videoId);
+  const originalOrder = ['a', 'b', 'c', 'd'].filter((id) => ids.includes(id));
+  assert.deepEqual(ids, originalOrder);
+});
+
+test('toggleShuffle: restore appends tracks added while shuffled', () => {
+  const q = new GuildQueue('g1');
+  q.addMany(['a', 'b', 'c'].map(track));
+  q.toggleShuffle();
+  q.add(track('d')); // added mid-shuffle
+  const off = q.toggleShuffle();
+  assert.equal(off.count, 4);
+  assert.deepEqual(q.list().map((t) => t.videoId), ['a', 'b', 'c', 'd']);
+});
+
+test('clear() resets shuffle state', () => {
+  const q = new GuildQueue('g1');
+  q.addMany(['a', 'b', 'c'].map(track));
+  q.toggleShuffle();
+  q.clear();
+  assert.equal(q.shuffleActive, false);
+  assert.equal(q.originalOrder, null);
+});

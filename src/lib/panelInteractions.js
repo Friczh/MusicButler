@@ -60,8 +60,8 @@ async function handlePanelInteraction(interaction, ctx) {
         // responds within Discord's 3s ack window without waiting on it.
         const isPaused = !wasPaused;
         await interaction.update({
-          embeds: [buildPanelEmbed({ track: player.queue.playing, queueLength: player.queue.list().length, isPaused, repeatMode: player.queue.repeatMode })],
-          components: buildPanelComponents({ isPaused, repeatMode: player.queue.repeatMode }),
+          embeds: [buildPanelEmbed({ track: player.queue.playing, queueLength: player.queue.list().length, isPaused, repeatMode: player.queue.repeatMode, shuffleActive: player.queue.shuffleActive })],
+          components: buildPanelComponents({ isPaused, repeatMode: player.queue.repeatMode, shuffleActive: player.queue.shuffleActive }),
         });
         return true;
       }
@@ -122,19 +122,33 @@ async function handlePanelInteraction(interaction, ctx) {
               queueLength: player.queue.list().length,
               isPaused: player.isPaused(),
               repeatMode: mode,
+              shuffleActive: player.queue.shuffleActive,
             }),
           ],
-          components: buildPanelComponents({ isPaused: player.isPaused(), repeatMode: mode }),
+          components: buildPanelComponents({ isPaused: player.isPaused(), repeatMode: mode, shuffleActive: player.queue.shuffleActive }),
         });
         return true;
       }
 
       case 'panel_shuffle': {
-        const n = player.queue.shuffle();
-        // Ephemeral, like the Queue button -- a one-time action, no
-        // persistent state to reflect on the panel itself.
+        const result = player.queue.toggleShuffle();
         const { shuffleReplyText } = require('../commands/shuffle');
-        await interaction.reply({ content: shuffleReplyText(n), ephemeral: true });
+        // Persistent toggle now, unlike the other buttons here -- update
+        // the panel in place so the embed/button reflect the new state,
+        // same pattern as panel_repeat.
+        await interaction.update({
+          embeds: [
+            buildPanelEmbed({
+              track: player.queue.playing,
+              queueLength: player.queue.list().length,
+              isPaused: player.isPaused(),
+              repeatMode: player.queue.repeatMode,
+              shuffleActive: result.active,
+            }),
+          ],
+          components: buildPanelComponents({ isPaused: player.isPaused(), repeatMode: player.queue.repeatMode, shuffleActive: result.active }),
+        });
+        await interaction.followUp({ content: shuffleReplyText(result), ephemeral: true });
         return true;
       }
 

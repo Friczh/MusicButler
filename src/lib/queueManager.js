@@ -37,6 +37,13 @@ class GuildQueue {
     // which never touches history -- it replays the same track object
     // directly without going through next() at all).
     this.repeatMode = 'off';
+    // Toggle state for shuffle (see toggleShuffle()). When active,
+    // originalOrder holds a snapshot of `tracks` from just before the
+    // shuffle was applied, by reference, so turning shuffle back off can
+    // restore the pre-shuffle order instead of leaving it randomized.
+    this.shuffleActive = false;
+    /** @type {Array<object>|null} */
+    this.originalOrder = null;
   }
 
   add(track) {
@@ -108,18 +115,48 @@ class GuildQueue {
     return true;
   }
 
-  /** Randomizes the order of upcoming tracks -- a one-time action, not a persistent mode. Returns the resulting track count. */
-  shuffle() {
+  /** In-place Fisher-Yates on the upcoming tracks. */
+  _shuffleInPlace() {
     for (let i = this.tracks.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.tracks[i], this.tracks[j]] = [this.tracks[j], this.tracks[i]];
     }
-    return this.tracks.length;
+  }
+
+  /**
+   * Toggles shuffle. Turning it on snapshots the current order and
+   * shuffles; turning it off restores that snapshot rather than leaving
+   * the queue randomized. Turning it on again from off re-snapshots
+   * whatever the (now-restored) order is and produces a fresh shuffle.
+   *
+   * Tracks added/removed while shuffle was active are reconciled by
+   * reference against the snapshot on restore: survivors keep their
+   * original relative order, anything new gets appended at the end.
+   *
+   * Returns { active, count }.
+   */
+  toggleShuffle() {
+    if (!this.shuffleActive) {
+      this.originalOrder = [...this.tracks];
+      this._shuffleInPlace();
+      this.shuffleActive = true;
+    } else {
+      const current = new Set(this.tracks);
+      const restored = this.originalOrder.filter((t) => current.has(t));
+      const restoredSet = new Set(restored);
+      const added = this.tracks.filter((t) => !restoredSet.has(t));
+      this.tracks = [...restored, ...added];
+      this.originalOrder = null;
+      this.shuffleActive = false;
+    }
+    return { active: this.shuffleActive, count: this.tracks.length };
   }
 
   clear() {
     this.tracks = [];
     this.history = [];
+    this.shuffleActive = false;
+    this.originalOrder = null;
   }
 
   list() {
