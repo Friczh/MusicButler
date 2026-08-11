@@ -6,6 +6,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  MessageFlags,
 } = require('discord.js');
 const { getIcon, getIconText } = require('../lib/icons');
 
@@ -80,6 +81,9 @@ module.exports = {
           embeds: [embed],
           components: [buildQueueRow(page, totalPages)],
           withResponse: true,
+          // Public but silent -- see skip.js's comment for why this has
+          // to be set on the initial reply(), not editReply() later.
+          flags: MessageFlags.SuppressNotifications,
         });
 
         const message = response.resource?.message ?? await interaction.fetchReply();
@@ -134,7 +138,7 @@ module.exports = {
           await interaction.reply({ content: 'Invalid position.', ephemeral: true });
           return;
         }
-        await interaction.reply(`🗑️ Removed: **${removed.title}**`);
+        await interaction.reply({ content: `🗑️ Removed: **${removed.title}**`, flags: MessageFlags.SuppressNotifications });
         return;
       }
 
@@ -142,7 +146,10 @@ module.exports = {
         const a = interaction.options.getInteger('position_a', true);
         const b = interaction.options.getInteger('position_b', true);
         const ok = queue.swap(a - 1, b - 1);
-        await interaction.reply(ok ? `🔀 Swapped ${a} and ${b}.` : 'Invalid positions.');
+        await interaction.reply({
+          content: ok ? `🔀 Swapped ${a} and ${b}.` : 'Invalid positions.',
+          flags: MessageFlags.SuppressNotifications,
+        });
         return;
       }
 
@@ -150,13 +157,16 @@ module.exports = {
         const from = interaction.options.getInteger('from', true);
         const to = interaction.options.getInteger('to', true);
         const ok = queue.move(from - 1, to - 1);
-        await interaction.reply(ok ? `➡️ Moved ${from} to ${to}.` : 'Invalid positions.');
+        await interaction.reply({
+          content: ok ? `➡️ Moved ${from} to ${to}.` : 'Invalid positions.',
+          flags: MessageFlags.SuppressNotifications,
+        });
         return;
       }
 
       case 'clear': {
         queue.clear();
-        await interaction.reply('🧹 Queue cleared.');
+        await interaction.reply({ content: '🧹 Queue cleared.', flags: MessageFlags.SuppressNotifications });
         return;
       }
 

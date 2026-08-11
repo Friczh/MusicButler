@@ -1,5 +1,6 @@
 'use strict';
 
+const { MessageFlags } = require('discord.js');
 const { getSession } = require('../lib/innertube');
 const { classifyInput, resolveQuery, resolvePlaylistTracks } = require('../lib/extract');
 const { config } = require('../lib/config');
@@ -85,7 +86,13 @@ module.exports = {
       return;
     }
 
-    await interaction.deferReply();
+    // A real reply() with a placeholder, not deferReply() -- this is the
+    // only way to get SuppressNotifications on the eventual result:
+    // that flag has to be set at message creation, and editReply() can't
+    // add it afterward (confirmed against installed source). reply()
+    // itself is the acknowledgment, same 3s-window requirement deferReply
+    // would have met.
+    await interaction.reply({ content: '🔎 Resolving...', flags: MessageFlags.SuppressNotifications });
 
     const result = await resolveAndQueue(query, {
       voiceChannel,

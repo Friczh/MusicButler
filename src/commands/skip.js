@@ -1,5 +1,7 @@
 'use strict';
 
+const { MessageFlags } = require('discord.js');
+
 module.exports = {
   name: 'skip',
   async execute(interaction, { playerManager }) {
@@ -9,6 +11,11 @@ module.exports = {
       return;
     }
     player.skip();
-    await interaction.reply('⏭️ Skipped.');
+    // Public (not ephemeral, everyone in the channel can see it) but
+    // silent -- no push/desktop notification. SuppressNotifications must
+    // be set at message creation; there's no way to add it via editReply
+    // later (confirmed against installed source), so it has to be on
+    // this initial reply() call.
+    await interaction.reply({ content: '⏭️ Skipped.', flags: MessageFlags.SuppressNotifications });
   },
 };

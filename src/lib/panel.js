@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  MessageFlags,
 } = require('discord.js');
 const { log } = require('./log');
 const { getIcon, getIconText } = require('./icons');
@@ -111,6 +112,11 @@ async function repostPanel(client, queue, { isPaused = false } = {}) {
     const message = await channel.send({
       embeds: [buildPanelEmbed({ track: queue.playing, queueLength: queue.list().length, isPaused, repeatMode: queue.repeatMode })],
       components: buildPanelComponents({ isPaused, repeatMode: queue.repeatMode }),
+      // Public, not ephemeral -- everyone in the channel needs to see and
+      // use it -- but silent, since this fires on every track change and
+      // was the original motivating complaint (VC flooded with
+      // notifications every time a track started).
+      flags: MessageFlags.SuppressNotifications,
     });
     queue.panelMessageId = message.id;
   } catch (err) {

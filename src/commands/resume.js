@@ -1,5 +1,7 @@
 'use strict';
 
+const { MessageFlags } = require('discord.js');
+
 module.exports = {
   name: 'resume',
   async execute(interaction, { playerManager }) {
@@ -9,6 +11,11 @@ module.exports = {
       return;
     }
     const ok = player.resume();
-    await interaction.reply(ok ? '▶️ Resumed.' : "Couldn't resume.");
+    // Public but silent -- see skip.js's comment for why this has to be
+    // on the initial reply() rather than added later.
+    await interaction.reply({
+      content: ok ? '▶️ Resumed.' : "Couldn't resume.",
+      flags: MessageFlags.SuppressNotifications,
+    });
   },
 };

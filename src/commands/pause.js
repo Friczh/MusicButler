@@ -1,5 +1,7 @@
 'use strict';
 
+const { MessageFlags } = require('discord.js');
+
 module.exports = {
   name: 'pause',
   async execute(interaction, { playerManager }) {
@@ -9,6 +11,11 @@ module.exports = {
       return;
     }
     const ok = player.pause();
-    await interaction.reply(ok ? '⏸️ Paused.' : "Couldn't pause.");
+    // Public but silent -- see skip.js's comment for why this has to be
+    // on the initial reply() rather than added later.
+    await interaction.reply({
+      content: ok ? '⏸️ Paused.' : "Couldn't pause.",
+      flags: MessageFlags.SuppressNotifications,
+    });
   },
 };

@@ -284,14 +284,19 @@ class GuildPlayer {
       // this codebase), same as a normal replay.
       track = finished;
     } else {
-      if (finished && !finished.silent && this.queue.repeatMode === 'all' && !isError) {
-        // Repeat-all -- the just-finished track goes to the BACK of the
-        // queue rather than being discarded, so the whole queue cycles
-        // instead of shrinking to nothing. (Skipped tracks get requeued
-        // here too, same as a natural end -- that's how "loop the queue"
-        // is expected to behave.)
-        this.queue.tracks.push(finished);
+      if (isError) {
+        // Don't let a track that just failed to play end up in
+        // repeat-all's history -- queue.next() records whatever is
+        // currently `playing` into history, so detaching the reference
+        // here (not clearing the queue, just this one pointer) keeps a
+        // broken track from eventually cycling back around and failing
+        // again, forever.
+        this.queue.playing = null;
       }
+      // Repeat-all's "loop the whole queue" behavior lives inside
+      // queue.next() itself now (it records finished tracks into
+      // history and refills from there once `tracks` runs dry) --
+      // nothing extra to do here for that case.
       track = this.queue.next();
     }
 

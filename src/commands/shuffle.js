@@ -1,5 +1,6 @@
 'use strict';
 
+const { MessageFlags } = require('discord.js');
 const { getIconText } = require('../lib/icons');
 
 /**
@@ -20,6 +21,8 @@ module.exports = {
   async execute(interaction, { playerManager }) {
     const player = playerManager.get(interaction.guildId);
     const n = player.queue.shuffle();
-    await interaction.reply(shuffleReplyText(n));
+    // Public but silent -- see skip.js's comment for why the flag has to
+    // be on this initial reply() call, not added via editReply() later.
+    await interaction.reply({ content: shuffleReplyText(n), flags: MessageFlags.SuppressNotifications });
   },
 };

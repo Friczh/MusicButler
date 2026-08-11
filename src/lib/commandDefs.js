@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
@@ -67,6 +67,10 @@ const commands = [
         )
     )
     .addSubcommand((sub) => sub.setName('clear').setDescription('Clear the queue')),
+  new SlashCommandBuilder()
+    .setName('seticons')
+    .setDescription('Re-upload the control-panel icon set (only needed after the bundled art changes)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map((builder) => builder.toJSON());
 
 module.exports = { commands };
