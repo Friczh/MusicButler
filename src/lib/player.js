@@ -15,7 +15,7 @@ const { getPoToken } = require('./potProvider');
 const { buildSabrAudioStream } = require('./sabr');
 const { PrebufferTransform } = require('./prebuffer');
 const { buildOpusPipeline, buildTranscodedOpusPipeline } = require('./demuxPipeline');
-const { config } = require('./config');
+const { config, OPUS_FRAME_MS } = require('./config');
 const { log } = require('./log');
 const { repostPanel, editPanelInPlace } = require('./panel');
 const { clearBotMessages } = require('./messageCleanup');
@@ -742,8 +742,9 @@ class GuildPlayer {
 
     let result;
     let prebufferTargetBytes; // hoisted: also read by the buffer-state debug log below
+    let bitrateBps; // hoisted: also read by the buffer-state debug log below (bytes -> seconds)
     try {
-      const bitrateBps = streamFormat.bitrate > 0 ? streamFormat.bitrate : config.assumedBitrateBps;
+      bitrateBps = streamFormat.bitrate > 0 ? streamFormat.bitrate : config.assumedBitrateBps;
       prebufferTargetBytes = Math.max(
         1,
         Math.ceil((bitrateBps / 8) * config.prebufferSeconds)
@@ -820,18 +821,25 @@ class GuildPlayer {
     });
 
     // Buffer state: periodic snapshot (not per-frame -- that'd be 50/sec)
-    // of what's currently sitting in each stage's internal buffer.
-    // stage1 (PrebufferTransform) is byte-mode: readableLength/
-    // writableLength are bytes. stage2 (opusStream, object-mode PassThrough
-    // inside buildOpusPipeline/buildTranscodedOpusPipeline) counts frames,
-    // not bytes, in object mode -- confirmed against Node's stream docs.
+    // of what's currently sitting in each stage's internal buffer,
+    // reported as seconds of audio held rather than raw bytes/frame
+    // counts -- "how much has it buffered" is what this is actually
+    // for, and bytes/frames don't answer that at a glance.
+    // stage1 (PrebufferTransform) is byte-mode: readableLength is bytes,
+    // converted via the format's bitrate. stage2 (opusStream,
+    // object-mode PassThrough inside buildOpusPipeline/
+    // buildTranscodedOpusPipeline) counts frames, not bytes, in object
+    // mode -- confirmed against Node's stream docs -- converted via the
+    // fixed 20ms Opus frame duration (OPUS_FRAME_MS).
     if (log.isVerbose()) {
+      const bytesPerSec = bitrateBps / 8;
       const bufferLogInterval = setInterval(() => {
+        const netSec = (stage1.readableLength / bytesPerSec).toFixed(1);
+        const targetSec = config.prebufferSeconds.toFixed(1);
+        const stallMs = opusStream.readableLength * OPUS_FRAME_MS;
         log.debug(
           `player:${this.guildId}`,
-          `buffer state for ${track.videoId}: ` +
-          `stage1(network) ${stage1.readableLength}B held / target ${prebufferTargetBytes}B, ` +
-          `stage2(stall) ${opusStream.readableLength}/${config.stallBufferFrames} frames`
+          `${track.videoId} buffered: net ${netSec}/${targetSec}s, stall ${stallMs}/${config.stallBufferMs}ms`
         );
       }, 5000);
       const stopBufferLog = () => clearInterval(bufferLogInterval);

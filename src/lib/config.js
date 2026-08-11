@@ -54,4 +54,4 @@ const config = {
   },
 };
 
-module.exports = { config, envNumber };
+module.exports = { config, envNumber, OPUS_FRAME_MS };
