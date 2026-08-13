@@ -49,13 +49,6 @@ const config = {
   // 0 disables both.
   idleTimeoutMin: envNumber('MB_IDLE_TIMEOUT_MIN', 5),
 
-  // Safety valve for /play's metadata-resolve step (session bootstrap +
-  // getInfo/search/playlist fetch, in play.js) -- NOT the audio pipeline
-  // itself (that has its own prebufferTimeoutMs above). Without this, a
-  // stalled YouTube API call leaves the "🔎 Resolving..." reply stuck
-  // indefinitely instead of failing with an actionable message.
-  resolveTimeoutMs: envNumber('MB_RESOLVE_TIMEOUT_MS', 15_000),
-
   get stallBufferFrames() {
     return Math.max(1, Math.round(this.stallBufferMs / OPUS_FRAME_MS));
   },

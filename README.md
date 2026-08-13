@@ -29,7 +29,7 @@ Pre-built images are also published to GHCR on every push to `main`. To run one 
 ```yaml
 services:
   musicbutler:
-    image: ghcr.io/friczh/musicbutler:latest
+    image: ghcr.io/friczh/musicbutler-stable:latest
     env_file:
       - .env
     restart: unless-stopped
