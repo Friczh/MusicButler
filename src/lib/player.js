@@ -63,16 +63,11 @@ class GuildPlayer {
     // ReadableStream -- confirmed against installed googlevideo source);
     // only calling .abort() on the SabrStream instance itself does.
     this._activeAbort = null;
+    // Set by skip() right before forcing Idle, read (and cleared) by the
     // Idle listener below -- lets _playNext() tell a manual skip apart
     // from a natural track-end, which matters for repeat-one (a manual
     // skip should always advance, not replay the same track).
     this._pendingManualSkip = false;
-    // Bounded retry-on-error state for _playNext()'s isError branch --
-    // see the MAX_ERROR_RETRIES comment there for why this exists. Keyed
-    // to a specific track id so an unrelated later track's first error
-    // isn't penalized by a previous track's exhausted retry count.
-    this._errorRetryTrackId = null;
-    this._errorRetryCount = 0;
     // "Alone in VC" timer -- see handleVoicePopulationChange(). Kept
     // separate from _idleTimer below (they start independently -- the
     // channel being empty doesn't itself mean playback is idle if a
@@ -230,21 +225,7 @@ class GuildPlayer {
   async enqueue(track) {
     this.queue.add(track);
     if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && !this.queue.playing) {
-      // Deliberately NOT awaited -- _playNext()'s full pipeline (metadata
-      // fetch, PO token, SABR acquisition, and the prebuffer wait itself)
-      // can take several seconds, worst case up to
-      // config.prebufferTimeoutMs. Blocking here would hold whatever's
-      // awaiting enqueue() -- the /play command's reply -- behind all of
-      // that, when the caller only actually needs to know the track was
-      // queued. _playNext() already manages its own state/panel updates
-      // and error recovery (same fire-and-forget pattern the Idle/error
-      // event handlers below already use), so it's safe to let it run in
-      // the background; this .catch() is just a backstop for a genuinely
-      // unexpected/uncaught failure, not the normal extraction-error path
-      // (which _playNext handles internally and never rejects for).
-      this._playNext().catch((err) =>
-        log.error(`player:${this.guildId}`, `enqueue: playback start failed: ${err.message}`)
-      );
+      await this._playNext();
     } else {
       // Something's already playing -- edit the panel's "up next" count
       // in place rather than reposting (repost is reserved for actual
@@ -259,11 +240,7 @@ class GuildPlayer {
     if (tracks.length === 0) return;
     this.queue.addMany(tracks);
     if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && !this.queue.playing) {
-      // See enqueue()'s comment above -- same reasoning, doubly so here
-      // since this is also what a playlist's /play reply was waiting on.
-      this._playNext().catch((err) =>
-        log.error(`player:${this.guildId}`, `enqueueMany: playback start failed: ${err.message}`)
-      );
+      await this._playNext();
     } else if (!tracks.every((t) => t.silent)) {
       this._updatePanelInPlace();
     }
@@ -418,41 +395,20 @@ class GuildPlayer {
     const finished = this.queue.playing;
     let track;
 
-    // Bounded retries: a transient playback failure (SABR reconnect
-    // exhaustion, a network blip, etc.) shouldn't silently defeat repeat
-    // by dropping the track on the very first error -- but an actually
-    // broken track still needs to eventually give up rather than retry
-    // forever. MAX_ERROR_RETRIES caps it at a few attempts before falling
-    // through to the same drop-and-advance behavior as before.
-    const MAX_ERROR_RETRIES = 2;
-    if (isError && finished) {
-      if (this._errorRetryTrackId !== finished.videoId) {
-        this._errorRetryTrackId = finished.videoId;
-        this._errorRetryCount = 0;
-      }
-    }
-    const canRetryOnError = Boolean(
-      isError && finished && !finished.silent && this.queue.repeatMode !== 'off' &&
-      this._errorRetryCount < MAX_ERROR_RETRIES
-    );
-
     if (finished && !finished.silent && this.queue.repeatMode === 'one' && !manualSkip && !isError) {
       // Repeat-one, and this wasn't a manual skip or a failure -- replay
       // the same track object instead of pulling from the queue. Always
       // re-extracted from scratch (no seek/position tracking anywhere in
       // this codebase), same as a normal replay.
       track = finished;
-    } else if (canRetryOnError) {
-      this._errorRetryCount += 1;
-      track = finished;
     } else {
       if (isError) {
-        // Retries (if any) are exhausted, or repeat is off -- don't let
-        // this track end up in repeat-all's history. queue.next()
-        // records whatever is currently `playing` into history, so
-        // detaching the reference here (not clearing the queue, just
-        // this one pointer) keeps a broken track from eventually cycling
-        // back around and failing again.
+        // Don't let a track that just failed to play end up in
+        // repeat-all's history -- queue.next() records whatever is
+        // currently `playing` into history, so detaching the reference
+        // here (not clearing the queue, just this one pointer) keeps a
+        // broken track from eventually cycling back around and failing
+        // again, forever.
         this.queue.playing = null;
       }
       // Repeat-all's "loop the whole queue" behavior lives inside
@@ -487,12 +443,6 @@ class GuildPlayer {
 
     log.debug(`player:${this.guildId}`, `now playing ${track.videoId}`);
     this._clearIdleTimer();
-    // Successful start -- reset the error-retry budget so a later,
-    // unrelated failure for this same track (or any other) gets a full
-    // fresh set of retries rather than inheriting a count left over from
-    // an earlier incident.
-    this._errorRetryTrackId = null;
-    this._errorRetryCount = 0;
     this.audioPlayer.play(resource);
 
     // Track change -- delete the old panel and post a fresh one at the

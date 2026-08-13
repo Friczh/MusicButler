@@ -140,21 +140,10 @@ client.on('voiceStateUpdate', (oldState, newState) => {
   const player = playerManager.get(guildId);
   const channelId = player.queue.voiceChannelId;
   if (!channelId) return;
-  // Counted from raw VoiceStates (populated purely by the
-  // GuildVoiceStates intent, which is all this bot has) -- NOT
-  // channel.members. That getter is backed by guild.members.cache, which
-  // needs the privileged GuildMembers intent (not granted here) to stay
-  // populated. Without it, a member's cache entry can go stale/get
-  // evicted while they're still genuinely in the channel, making
-  // channel.members silently under-report occupancy and falsely trigger
-  // the alone-timer even with someone still present. Excluding the bot's
-  // own id (rather than filtering `.user.bot`, which also needs a cached
-  // member/user object) sidesteps the same cache dependency -- fine
-  // given this is a single-guild, single-bot deployment.
-  const occupants = oldState.guild.voiceStates.cache.filter(
-    (vs) => vs.channelId === channelId && vs.id !== client.user.id
-  ).size;
-  player.handleVoicePopulationChange(occupants === 0);
+  const channel = oldState.guild.channels.cache.get(channelId);
+  if (!channel) return;
+  const humanMembers = channel.members.filter((m) => !m.user.bot);
+  player.handleVoicePopulationChange(humanMembers.size === 0);
 });
 
 log.debug('discord', 'connecting to Discord gateway...');

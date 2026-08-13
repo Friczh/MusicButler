@@ -6,22 +6,6 @@ const { classifyInput, resolveQuery, resolvePlaylistTracks } = require('../lib/e
 const { config } = require('../lib/config');
 
 /**
- * Races `promise` against a timeout so a stalled YouTube API call fails
- * fast with an actionable message instead of leaving the caller (here,
- * /play's "🔎 Resolving..." reply) stuck indefinitely. The underlying
- * call is NOT cancelled -- it keeps running in the background (harmless;
- * getSession()'s result still gets cached for next time if it eventually
- * succeeds) -- this only stops WAITING on it.
- */
-function withTimeout(promise, ms, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-/**
  * Core of /play, extracted so the panel's Play-button modal (see index.js)
  * can reuse it without an interaction object. Never touches
  * interaction.reply/editReply itself -- callers own their own reply
@@ -39,21 +23,17 @@ async function resolveAndQueue(query, { voiceChannel, guildId, channelId, reques
   // context from the start (search has no music-specific path, so it
   // always stays WEB).
   const isMusicRequest = classification.kind !== 'search' && classification.isMusic;
+  const session = await getSession({ clientType: isMusicRequest ? 'YTMUSIC' : 'WEB' });
 
   let tracksToQueue;
   let replyText;
   try {
-    const session = await withTimeout(
-      getSession({ clientType: isMusicRequest ? 'YTMUSIC' : 'WEB' }),
-      config.resolveTimeoutMs,
-      'Timed out contacting YouTube -- try again in a moment.'
-    );
-
     if (classification.kind === 'playlist') {
-      const resolved = await withTimeout(
-        resolvePlaylistTracks(session, classification.playlistId, classification.isMusic, { maxTracks: config.playlistMaxTracks }),
-        config.resolveTimeoutMs,
-        'Timed out resolving that playlist -- try again in a moment.'
+      const resolved = await resolvePlaylistTracks(
+        session,
+        classification.playlistId,
+        classification.isMusic,
+        { maxTracks: config.playlistMaxTracks }
       );
       if (resolved.length === 0) {
         return { ok: false, errorText: 'That playlist has no playable tracks.' };
@@ -62,11 +42,7 @@ async function resolveAndQueue(query, { voiceChannel, guildId, channelId, reques
       replyText = `📜 Queued playlist: **${resolved.length}** track${resolved.length === 1 ? '' : 's'}`;
     } else {
       // 'video' or 'search' — resolveQuery re-derives this itself.
-      const resolved = await withTimeout(
-        resolveQuery(session, query),
-        config.resolveTimeoutMs,
-        'Timed out resolving that -- try again in a moment.'
-      );
+      const resolved = await resolveQuery(session, query);
       tracksToQueue = [resolved];
       replyText = `🎵 Queued: **${resolved.title}**`;
     }
@@ -101,7 +77,6 @@ async function resolveAndQueue(query, { voiceChannel, guildId, channelId, reques
 module.exports = {
   name: 'play',
   resolveAndQueue,
-  withTimeout,
   async execute(interaction, { playerManager }) {
     const query = interaction.options.getString('query', true);
     const voiceChannel = interaction.member?.voice?.channel;
