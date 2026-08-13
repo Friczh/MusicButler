@@ -7,11 +7,12 @@ const { getIconText } = require('../lib/icons');
  * Exported so the panel's Shuffle button (panelInteractions.js) uses
  * identical text.
  */
-function shuffleReplyText({ active, count }) {
+function shuffleReplyText({ active, count, refused }) {
   const icon = getIconText(active ? 'shuffle_on' : 'shuffle_off');
+  if (refused) {
+    return count === 0 ? `${icon} Nothing to shuffle.` : `${icon} Queue too short to shuffle.`;
+  }
   if (active) {
-    if (count === 0) return `${icon} Nothing to shuffle.`;
-    if (count === 1) return `${icon} Queue too short to shuffle.`;
     return `${icon} Shuffle on -- ${count} tracks shuffled.`;
   }
   return `${icon} Shuffle off -- original order restored.`;

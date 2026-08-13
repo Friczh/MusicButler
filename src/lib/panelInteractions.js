@@ -114,7 +114,7 @@ async function handlePanelInteraction(interaction, ctx) {
       }
 
       case 'panel_repeat': {
-        const mode = player.queue.cycleRepeatMode();
+        const mode = player.cycleRepeatMode();
         await interaction.update({
           embeds: [
             buildPanelEmbed({

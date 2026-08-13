@@ -133,10 +133,16 @@ class GuildQueue {
    * reference against the snapshot on restore: survivors keep their
    * original relative order, anything new gets appended at the end.
    *
-   * Returns { active, count }.
+   * Refuses to turn on with 0 or 1 upcoming tracks -- state is left
+   * completely untouched (shuffleActive stays false) so callers don't
+   * end up rendering an "on" panel/button for something that didn't
+   * actually happen. Returns { active, count, refused }.
    */
   toggleShuffle() {
     if (!this.shuffleActive) {
+      if (this.tracks.length <= 1) {
+        return { active: false, count: this.tracks.length, refused: true };
+      }
       this.originalOrder = [...this.tracks];
       this._shuffleInPlace();
       this.shuffleActive = true;

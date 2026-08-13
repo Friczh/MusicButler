@@ -9,7 +9,7 @@ module.exports = {
   async execute(interaction, { playerManager }) {
     const mode = interaction.options.getString('mode', true);
     const player = playerManager.get(interaction.guildId);
-    const applied = player.queue.setRepeatMode(mode);
+    const applied = player.setRepeatMode(mode);
 
     await interaction.reply({
       content: `${getIconText(`repeat_${applied}`)} Repeat: **${LABELS[applied]}**`,

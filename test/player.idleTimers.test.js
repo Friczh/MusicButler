@@ -151,3 +151,56 @@ test('disconnect() clears both timers', (t) => {
     assert.equal(fired, false);
   });
 });
+
+test('idle timer never starts while repeat is on', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withIdleTimeout(5, () => {
+    let fired = false;
+    const player = makePlayer(() => { fired = true; });
+    player.queue.repeatMode = 'one';
+    player.pause();
+    assert.equal(player._idleTimer, null);
+    t.mock.timers.tick(10 * 60_000);
+    assert.equal(fired, false);
+  });
+});
+
+test('enabling repeat clears an already-running idle timer', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withIdleTimeout(5, () => {
+    let fired = false;
+    const player = makePlayer(() => { fired = true; });
+    player.pause(); // idle timer starts, repeat still off
+    assert.ok(player._idleTimer);
+    player.setRepeatMode('one'); // repeat turned on mid-countdown
+    assert.equal(player._idleTimer, null);
+    t.mock.timers.tick(10 * 60_000);
+    assert.equal(fired, false);
+  });
+});
+
+test('cycleRepeatMode() also clears an already-running idle timer', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withIdleTimeout(5, () => {
+    const player = makePlayer(() => {});
+    player.pause();
+    assert.ok(player._idleTimer);
+    player.queue.repeatMode = 'all'; // one cycle-step away from 'one'
+    player.cycleRepeatMode();
+    assert.equal(player.queue.repeatMode, 'one');
+    assert.equal(player._idleTimer, null);
+  });
+});
+
+test('turning repeat back off lets the idle timer start again normally', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  withIdleTimeout(5, () => {
+    const player = makePlayer(() => {});
+    player.setRepeatMode('one');
+    player.pause();
+    assert.equal(player._idleTimer, null); // suppressed while repeat is on
+    player.setRepeatMode('off');
+    player.pause(); // still "paused" (pause() is idempotent-ish here since stubbed), re-checks the timer
+    assert.ok(player._idleTimer);
+  });
+});

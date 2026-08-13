@@ -191,3 +191,17 @@ test('clear() resets shuffle state', () => {
   assert.equal(q.shuffleActive, false);
   assert.equal(q.originalOrder, null);
 });
+
+test('toggleShuffle: refuses to turn on with 0 or 1 tracks, state untouched', () => {
+  const q = new GuildQueue('g1');
+  const empty = q.toggleShuffle();
+  assert.equal(empty.active, false);
+  assert.equal(empty.refused, true);
+  assert.equal(q.shuffleActive, false);
+
+  q.add(track('a'));
+  const single = q.toggleShuffle();
+  assert.equal(single.active, false);
+  assert.equal(single.refused, true);
+  assert.equal(q.shuffleActive, false);
+});

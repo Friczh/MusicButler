@@ -133,6 +133,13 @@ class GuildPlayer {
 
   _startIdleTimer() {
     if (this._idleTimer || config.idleTimeoutMin <= 0) return;
+    // Repeat (either mode) means "keep this going" -- the idle auto-exit
+    // doesn't apply while it's on, otherwise a countdown started before
+    // repeat was enabled (an earlier pause/drain) could fire mid-loop and
+    // tear the whole player down out from under active playback. The
+    // alone-in-VC timer is unaffected -- that's a population concern,
+    // not a playback one, and still applies regardless of repeat mode.
+    if (this.queue.repeatMode !== 'off') return;
     this._idleTimer = setTimeout(() => this._fireTimeout('idle'), config.idleTimeoutMin * 60_000);
   }
 
@@ -299,6 +306,26 @@ class GuildPlayer {
     editPanelInPlace(this.client, this.queue, { isPaused: this.isPaused() }).catch((err) =>
       log.error(`player:${this.guildId}`, `panel edit failed: ${err.message}`)
     );
+  }
+
+  /**
+   * Wraps queue.setRepeatMode()/cycleRepeatMode() -- also clears the idle
+   * timer if repeat is now on. Needed for the case where the idle timer
+   * started BEFORE repeat was turned on (e.g. paused, then repeat
+   * enabled, then resumed) -- _startIdleTimer()'s repeatMode guard only
+   * stops NEW countdowns; this stops an already-running one from
+   * surviving into a now-repeating session.
+   */
+  setRepeatMode(mode) {
+    const applied = this.queue.setRepeatMode(mode);
+    if (applied !== 'off') this._clearIdleTimer();
+    return applied;
+  }
+
+  cycleRepeatMode() {
+    const applied = this.queue.cycleRepeatMode();
+    if (applied !== 'off') this._clearIdleTimer();
+    return applied;
   }
 
   /** Public -- used by commands (e.g. /repeat) that change queue state without an interaction bound to the panel message itself. */
