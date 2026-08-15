@@ -68,6 +68,20 @@ class GuildPlayer {
     // from a natural track-end, which matters for repeat-one (a manual
     // skip should always advance, not replay the same track).
     this._pendingManualSkip = false;
+    // Set true only while a SABR mid-stream reconnect has us holding
+    // audioPlayer.pause() to dodge @discordjs/voice's own maxMissedFrames
+    // kill-switch (default 5 missed 20ms frames = 100ms tolerance -- far
+    // shorter than a reconnect can realistically take, confirmed against
+    // installed @discordjs/voice source: AudioPlayer._stepPrepare() calls
+    // this.stop() the instant that counter is hit, which is what was
+    // silently ending tracks a few seconds in on a recoverable SABR
+    // hiccup that had already succeeded reconnecting by the time the
+    // kill fired -- see _pauseForReconnect()/_unpauseAfterReconnect()).
+    // Only ever unpause automatically when THIS flag says WE were the
+    // one who paused -- never override a pause the user triggered via
+    // /pause, including one that happens to land in the middle of our
+    // own reconnect-pause window (see _pauseForReconnect()'s guard).
+    this._pausedForReconnect = false;
     // "Alone in VC" timer -- see handleVoicePopulationChange(). Kept
     // separate from _idleTimer below (they start independently -- the
     // channel being empty doesn't itself mean playback is idle if a
@@ -368,6 +382,30 @@ class GuildPlayer {
   }
 
   /**
+   * Called from sabr.js's onReconnectStart during a mid-stream SABR
+   * reconnect. Only pauses (and only sets the flag) if the player is
+   * actually Playing right now -- if it's already Paused, that's a user
+   * pause already in effect, and we must not claim credit for it, or
+   * _unpauseAfterReconnect() would incorrectly undo the user's pause
+   * once the reconnect finishes.
+   */
+  _pauseForReconnect() {
+    if (this.audioPlayer.state.status === AudioPlayerStatus.Playing) {
+      this.audioPlayer.pause();
+      this._pausedForReconnect = true;
+    }
+  }
+
+  /** Called from sabr.js's onReconnectEnd (success or final give-up alike -- see sabr.js). */
+  _unpauseAfterReconnect() {
+    if (!this._pausedForReconnect) return;
+    this._pausedForReconnect = false;
+    if (this.audioPlayer.state.status === AudioPlayerStatus.Paused) {
+      this.audioPlayer.unpause();
+    }
+  }
+
+  /**
    * Stops whatever SABR fetch loop the OUTGOING track (the one we're
    * moving away from -- finished, skipped, or failed) left running, if
    * any. Best-effort: SabrStream.abort() calls controller.error() on
@@ -532,6 +570,8 @@ class GuildPlayer {
         // session.session.player.po_token in _buildResource) -- this is
         // what actually fixes the stale-token failure mode.
         refetchPoToken: () => getPoToken(track.videoId),
+        onReconnectStart: () => this._pauseForReconnect(),
+        onReconnectEnd: () => this._unpauseAfterReconnect(),
       }
     );
     log.debug(`player:${this.guildId}`, `${track.videoId}: SABR acquisition succeeded, itag ${sabrFormat.itag}, mimeType ${sabrFormat.mimeType}`);
@@ -546,6 +586,11 @@ class GuildPlayer {
   }
 
   async _buildResource(track) {
+    // Defensive reset -- a previous track aborted mid-reconnect (skip,
+    // error, etc.) could in principle leave this set from a pause that
+    // never got its matching onReconnectEnd. A fresh track starting
+    // means whatever that pause was for is moot regardless.
+    this._pausedForReconnect = false;
     // Session client_type must match the track's context — a po_token/
     // visitor_data minted for WEB is not valid for a YTMUSIC request (or
     // vice versa). This was the actual cause of YTM playback failing with
@@ -924,8 +969,16 @@ class GuildPlayer {
     // destroy that information.
     if (log.isVerbose()) {
       const bytesPerSec = bitrateBps / 8;
-      let minStage1Since = stage1.readableLength;
-      let minStage2Since = opusStream.readableLength;
+      // Infinity, not the instantaneous value at creation -- stage1 and
+      // opusStream are both freshly created and empty at this exact
+      // point, so seeding from .readableLength here would start every
+      // window at 0 by construction (nothing buffered yet has nothing to
+      // do with real starvation) and, since Math.min can only shrink,
+      // that false 0 would then survive as the reported minimum for the
+      // entire first window regardless of what actually happened during
+      // it.
+      let minStage1Since = Infinity;
+      let minStage2Since = Infinity;
       const bufferLogInterval = setInterval(() => {
         const netSec = (stage1.readableLength / bytesPerSec).toFixed(1);
         const targetSec = config.prebufferSeconds.toFixed(1);

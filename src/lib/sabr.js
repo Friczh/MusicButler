@@ -331,7 +331,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   };
 }
 
-async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken, stallDetectionMs } = {}) {
+async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken, stallDetectionMs, onReconnectStart, onReconnectEnd } = {}) {
   const params = await deriveSabrParams(info, session);
   let attempt = await startSabrAttempt(params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs);
   let currentPoToken = poToken;
@@ -361,6 +361,14 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
   let currentReader = attempt.audioStream.getReader();
   let aborted = false;
   let reconnectAttempts = 0;
+  // Set the moment a reconnect begins, cleared once the reconnected
+  // stream's first chunk actually reaches enqueue() -- NOT at the moment
+  // the new SabrStream instance starts, since "started" and "has data"
+  // aren't the same thing (see startSabrAttempt: the first real fetch
+  // still has to complete). onReconnectEnd firing on "started" instead
+  // of "has data" would tell the caller it's safe to un-pause before
+  // anything is actually ready to play, defeating the point.
+  let awaitingFirstChunkAfterReconnect = false;
 
   // Async fetch/UMP-processing errors (network failures, server-sent
   // SABR_ERROR parts, stalls, retries exhausted, etc.) do NOT throw from
@@ -392,11 +400,25 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             controller.close();
             return;
           }
+          // Whichever of the three ways this can end in failure below,
+          // the pause onReconnectStart triggered (if any) must not be
+          // left stuck forever with no matching onReconnectEnd -- the
+          // track is about to hard-error regardless, but the caller's
+          // paused AudioPlayer has no other way to find out recovery
+          // isn't coming.
+          const clearReconnectFlag = () => {
+            if (awaitingFirstChunkAfterReconnect) {
+              awaitingFirstChunkAfterReconnect = false;
+              onReconnectEnd?.();
+            }
+          };
           if (!RECOVERABLE_SABR_ERROR_MESSAGES.has(err.message) || !refetchInfo) {
+            clearReconnectFlag();
             controller.error(err);
             return;
           }
           if (reconnectAttempts >= MAX_SABR_RECONNECT_ATTEMPTS) {
+            clearReconnectFlag();
             controller.error(
               new Error(`buildSabrAudioStream: gave up after ${MAX_SABR_RECONNECT_ATTEMPTS} reconnect attempts (last error: ${err.message})`)
             );
@@ -410,6 +432,8 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             `${reloadState ? ' with resumed playback position' : ' from a cold start (no resumable state captured)'}` +
             `${refetchPoToken ? ', re-minting PO token' : ''}`
           );
+          onReconnectStart?.();
+          awaitingFirstChunkAfterReconnect = true;
           try {
             if (refetchPoToken) {
               currentPoToken = await refetchPoToken();
@@ -427,6 +451,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             currentReader = attempt.audioStream.getReader();
             continue; // retry the read against the newly reconnected stream
           } catch (reconnectErr) {
+            clearReconnectFlag();
             controller.error(
               new Error(`buildSabrAudioStream: reload reconnect failed: ${reconnectErr.message}`)
             );
@@ -436,6 +461,10 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
         if (result.done) {
           controller.close();
           return;
+        }
+        if (awaitingFirstChunkAfterReconnect) {
+          awaitingFirstChunkAfterReconnect = false;
+          onReconnectEnd?.();
         }
         if (process.env.SABR_DEBUG_ENQUEUE) console.error('[ENQUEUE]', result.value.length, 'bytes, first4=', Buffer.from(result.value.slice(0,4)).toString('hex'));
         controller.enqueue(result.value);

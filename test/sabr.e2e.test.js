@@ -526,6 +526,157 @@ test('SABR e2e: buildSabrAudioStream survives a mid-stream RELOAD_PLAYER_RESPONS
   assert.equal(reloadResponsesSent, RELOAD_COUNT, 'sanity check: the mock must have actually exhausted all retry attempts with reloads');
 });
 
+test('SABR e2e: buildSabrAudioStream fires onReconnectStart/onReconnectEnd around a mid-stream reconnect, in order, exactly once each', async () => {
+  // Covers the gap that let a successful reconnect still silently end
+  // the track: player.js pauses @discordjs/voice's AudioPlayer on
+  // onReconnectStart (dodging its ~100ms missedFrames kill-switch, far
+  // shorter than a reconnect can realistically take) and unpauses on
+  // onReconnectEnd. If onReconnectEnd fired too early -- e.g. as soon as
+  // the new SabrStream instance exists, rather than once it actually has
+  // data -- the caller would unpause before anything is ready to play
+  // and the kill-switch problem this exists to fix would still happen.
+  // Reuses the exact same reload-then-recover mock shape as the test
+  // above (proven byte-correct there); this test only adds assertions
+  // on the callback ordering and count.
+  const fileBuffer = fs.readFileSync(FIXTURE_PATH);
+  const audioFormat = makeAudioFormat(fileBuffer.length);
+  const initSize = 1500;
+  const segmentSize = 1800;
+  const initBytes = fileBuffer.subarray(0, initSize);
+  const restBytes = fileBuffer.subarray(initSize);
+  const mediaSegments = [];
+  for (let i = 0; i < restBytes.length; i += segmentSize) {
+    mediaSegments.push(restBytes.subarray(i, i + segmentSize));
+  }
+  assert.ok(mediaSegments.length >= 2, 'fixture must split into at least 2 media segments for this test to be meaningful');
+
+  let nextSegmentIndex = 0;
+  let startMs = 0;
+  let startRange = initSize;
+  let reloadResponsesSent = 0;
+  const RELOAD_COUNT = 4;
+
+  const fetchFn = async (_url, options) => {
+    const bodyBytes = new Uint8Array(
+      options.body instanceof ArrayBuffer ? options.body : await new Response(options.body).arrayBuffer()
+    );
+    const req = VideoPlaybackAbrRequest.decode(bodyBytes);
+    const playerTimeMs = parseInt(req.clientAbrState?.playerTimeMs || '0');
+
+    const parts = [];
+    parts.push(part(UMPPartId.NEXT_REQUEST_POLICY, NextRequestPolicy.encode({
+      targetAudioReadaheadMs: 15000,
+      targetVideoReadaheadMs: 15000,
+      backoffTimeMs: 0,
+      playbackCookie: { resolution: 0, field2: 0, videoFmt: VIDEO_FORMAT, audioFmt: audioFormat },
+      videoId: '',
+    }).finish()));
+
+    if (playerTimeMs === 0) {
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: audioFormat,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: String(mediaSegments.length),
+        mimeType: audioFormat.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: VIDEO_FORMAT,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: '0',
+        mimeType: VIDEO_FORMAT.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(mediaHeaderPart(0, 0, 0, 0, 0, initBytes.length, true, audioFormat));
+      parts.push(mediaPart(0, initBytes));
+      parts.push(mediaEndPart(0));
+    } else if (reloadResponsesSent < RELOAD_COUNT) {
+      reloadResponsesSent++;
+      parts.push(part(UMPPartId.RELOAD_PLAYER_RESPONSE, ReloadPlaybackContext.encode({
+        reloadPlaybackParams: { token: 'test-reload-token' },
+      }).finish()));
+      const buffer = new CompositeBuffer();
+      const writer = new UmpWriter(buffer);
+      for (const p of parts) writer.write(p.partType, p.partData);
+      return new Response(concatenateChunks(buffer.chunks), {
+        status: 200,
+        headers: { 'Content-Type': 'application/vnd.yt-ump' },
+      });
+    }
+
+    if (nextSegmentIndex < mediaSegments.length) {
+      const seg = mediaSegments[nextSegmentIndex];
+      const headerId = nextSegmentIndex + 1;
+      const durationMs = Math.round(1000 / mediaSegments.length);
+      parts.push(mediaHeaderPart(headerId, nextSegmentIndex + 1, startMs, durationMs, startRange, seg.length, false, audioFormat));
+      parts.push(mediaPart(headerId, seg));
+      parts.push(mediaEndPart(headerId));
+      startMs += durationMs;
+      startRange += seg.length;
+      nextSegmentIndex++;
+    }
+
+    const buffer = new CompositeBuffer();
+    const writer = new UmpWriter(buffer);
+    for (const p of parts) writer.write(p.partType, p.partData);
+    return new Response(concatenateChunks(buffer.chunks), {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.yt-ump' },
+    });
+  };
+
+  const info = {
+    streaming_data: {
+      server_abr_streaming_url: 'https://test.invalid/sabr-reload-callbacks',
+      adaptive_formats: [VIDEO_FORMAT, audioFormat],
+    },
+    player_config: {
+      media_common_config: {
+        media_ustreamer_request_config: { video_playback_ustreamer_config: 'abc' },
+      },
+    },
+  };
+  const refetchInfo = async () => info;
+
+  const events = [];
+  const onReconnectStart = () => events.push('start');
+  const onReconnectEnd = () => events.push('end');
+
+  const originalFetch = global.fetch;
+  global.fetch = fetchFn;
+  try {
+    const { audioStream } = await buildSabrAudioStream(
+      info,
+      MOCK_SESSION,
+      CLIENT_INFO,
+      'abc',
+      { refetchInfo, onReconnectStart, onReconnectEnd }
+    );
+
+    // Neither callback should have fired yet -- reconnect only happens
+    // lazily once the stream is actually pulled from below.
+    assert.deepEqual(events, []);
+
+    const reader = audioStream.getReader();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(
+    events,
+    ['start', 'end'],
+    'exactly one start and one end, in that order -- no duplicates, no end without a start, no missing end'
+  );
+});
+
 test('SABR e2e: buildSabrAudioStream survives a stale PO token (STREAM_PROTECTION_STATUS attestation-pending -> "No media parts" exhaustion) by re-minting the token and reconnecting', async () => {
   const fileBuffer = fs.readFileSync(FIXTURE_PATH);
   const audioFormat = makeAudioFormat(fileBuffer.length);
@@ -777,13 +928,18 @@ test('SABR e2e: buildSabrAudioStream gives up after MAX_SABR_RECONNECT_ATTEMPTS 
 
   const originalFetch = global.fetch;
   global.fetch = fetchFn;
+  const events = [];
   try {
     const { audioStream } = await buildSabrAudioStream(
       info,
       MOCK_SESSION,
       CLIENT_INFO,
       'abc',
-      { refetchInfo }
+      {
+        refetchInfo,
+        onReconnectStart: () => events.push('start'),
+        onReconnectEnd: () => events.push('end'),
+      }
     );
 
     const reader = audioStream.getReader();
@@ -799,6 +955,15 @@ test('SABR e2e: buildSabrAudioStream gives up after MAX_SABR_RECONNECT_ATTEMPTS 
   } finally {
     global.fetch = originalFetch;
   }
+
+  // 5 reconnects, all of which failed permanently (never got real data
+  // again) -- start fires once per attempt, but end must ALSO fire once
+  // for the very last one, even though it never succeeded, or a caller
+  // that paused on the first 'start' (see player.js's
+  // _pauseForReconnect()) would stay paused forever with no track ever
+  // actually resuming or moving on.
+  assert.equal(events.filter((e) => e === 'start').length, 5, 'onReconnectStart once per reconnect attempt');
+  assert.deepEqual(events.slice(-1), ['end'], 'the final event must be an onReconnectEnd, even though that last reconnect never got real data -- the caller must not stay paused forever waiting for one');
 
   // Exactly 5 reconnects means exactly 6 SabrStream instances total
   // (initial + 5 reconnects). Each instance exhausts SABR_MAX_RETRIES (3)
