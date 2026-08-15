@@ -87,3 +87,62 @@ test('an empty source still ends cleanly without emitting prebuffered', async ()
   assert.equal(prebufferedFired, false);
   assert.equal(output.length, 0);
 });
+
+test('forceRelease() hands over partial data immediately without waiting for targetBytes', async () => {
+  const t = new PrebufferTransform({ targetBytes: 1_000_000 });
+  let bufferedAtEvent = null;
+  t.once('prebuffered', ({ bufferedBytes }) => {
+    bufferedAtEvent = bufferedBytes;
+  });
+
+  const chunks = [];
+  t.on('data', (c) => chunks.push(c));
+
+  t.write(Buffer.alloc(3, 'x'));
+  t.write(Buffer.alloc(4, 'y'));
+  // Nothing should have emerged yet -- still well under targetBytes.
+  assert.equal(chunks.length, 0);
+
+  t.forceRelease();
+
+  assert.equal(bufferedAtEvent, 7);
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].length, 7);
+});
+
+test('forceRelease() is a no-op if the target was already reached naturally', async () => {
+  const t = new PrebufferTransform({ targetBytes: 2 });
+  const releasedAt = [];
+  t.on('data', (chunk) => releasedAt.push(chunk.length));
+  let prebufferedCount = 0;
+  t.on('prebuffered', () => { prebufferedCount++; });
+
+  t.write(Buffer.alloc(2)); // reaches target -> releases naturally
+  t.forceRelease(); // should do nothing -- already released
+  t.write(Buffer.alloc(3)); // still flows through live afterward
+
+  assert.equal(prebufferedCount, 1);
+  assert.deepEqual(releasedAt, [2, 3]);
+});
+
+test('forceRelease() on a stream with zero bytes buffered still emits prebuffered so callers awaiting it never hang', async () => {
+  const t = new PrebufferTransform({ targetBytes: 100 });
+  let fired = false;
+  let bufferedAtEvent = null;
+  t.once('prebuffered', ({ bufferedBytes }) => {
+    fired = true;
+    bufferedAtEvent = bufferedBytes;
+  });
+
+  t.forceRelease();
+
+  assert.equal(fired, true);
+  assert.equal(bufferedAtEvent, 0);
+
+  // Subsequent writes should now flow straight through (released mode).
+  const chunks = [];
+  t.on('data', (c) => chunks.push(c));
+  t.write(Buffer.alloc(5));
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].length, 5);
+});

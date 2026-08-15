@@ -767,6 +767,36 @@ class GuildPlayer {
       if (stage1 && !stage1.destroyed) stage1.destroy(err);
     });
 
+    // [network] chunk-arrival gap tracking -- diagnostic only, gated
+    // below by log.isVerbose(). Separate from stage1/stage2's own
+    // buffer-level monitors: this watches the SOURCE side (raw chunks
+    // arriving from the CDN fetch, before any of our own buffering),
+    // to tell apart "the fetch itself paused" from "the fetch kept
+    // delivering fine but something downstream didn't drain fast
+    // enough". Without this, a stage1/stage2 starvation reading alone
+    // can't say which end of the pipe caused it.
+    let lastChunkAt = null;
+    if (log.isVerbose()) {
+      nodeStream.on('data', (chunk) => {
+        const now = Date.now();
+        if (lastChunkAt !== null) {
+          const gapMs = now - lastChunkAt;
+          // 100ms threshold: comfortably above normal TCP/segment-fetch
+          // jitter, well below the ~400-500ms glitch cadence being
+          // chased -- a real gap this size is a plausible contributor,
+          // normal inter-chunk timing is not.
+          if (gapMs >= 100) {
+            log.debug(
+              `player:${this.guildId}`,
+              `[network] ${track.videoId} gap: ${gapMs}ms since last chunk ` +
+              `(source: ${usedSabr ? 'SABR' : 'direct'}), this chunk ${chunk.length} bytes`
+            );
+          }
+        }
+        lastChunkAt = now;
+      });
+    }
+
     let result;
     let prebufferTargetBytes; // hoisted: also read by the buffer-state debug log below
     let bitrateBps; // hoisted: also read by the buffer-state debug log below (bytes -> seconds)
@@ -801,6 +831,14 @@ class GuildPlayer {
         };
         const timer = setTimeout(() => {
           cleanup();
+          // Without this, stage1 keeps withholding everything until
+          // targetBytes is eventually reached regardless of the timeout
+          // -- "starting anyway" below would be a lie, since nothing
+          // downstream actually receives data until the full prebuffer
+          // target arrives (or the source ends). forceRelease() hands
+          // over whatever's buffered so far right now, matching what the
+          // log message actually claims is happening.
+          stage1.forceRelease();
           resolve({ timedOut: true });
         }, config.prebufferTimeoutMs);
         const cleanup = () => {
@@ -851,25 +889,90 @@ class GuildPlayer {
     // of what's currently sitting in each stage's internal buffer,
     // reported as seconds of audio held rather than raw bytes/frame
     // counts -- "how much has it buffered" is what this is actually
-    // for, and bytes/frames don't answer that at a glance.
+    // for, and bytes/frames don't answer that at a glance. Tagged
+    // [stage1]/[stage2] (in the message text, not the log scope) so the
+    // two are easy to tell apart and grep for independently -- they're
+    // different stages with different failure implications (stage1
+    // starving points at the network/CDN fetch, stage2 starving points
+    // at demux throughput or the object-buffer sizing feeding
+    // @discordjs/voice directly).
     // stage1 (PrebufferTransform) is byte-mode: readableLength is bytes,
     // converted via the format's bitrate. stage2 (opusStream,
     // object-mode PassThrough inside buildOpusPipeline/
     // buildTranscodedOpusPipeline) counts frames, not bytes, in object
     // mode -- confirmed against Node's stream docs -- converted via the
     // fixed 20ms Opus frame duration (OPUS_FRAME_MS).
+    //
+    // A 5-second snapshot cannot see a glitch shorter than 5 seconds --
+    // it only proves the buffer happened to be non-empty at each sample
+    // point, not that it stayed that way in between. Reported glitches
+    // this coarse a sample can't rule out: short, repeating dips where
+    // stage2 empties out between samples and refills before the next one
+    // fires. The starve monitor below exists specifically to catch that:
+    // it polls stage2.readableLength on the SAME cadence @discordjs/voice
+    // itself reads from it (OPUS_FRAME_MS, confirmed against installed
+    // source -- AudioPlayer's audioCycleStep runs every FRAME_LENGTH =
+    // 20ms and calls state.resource.read() once per tick, injecting a
+    // silence frame and counting a "missed frame" whenever that read
+    // comes back empty -- 5 consecutive misses stops the track outright).
+    // A run of consecutive empty polls here is the same condition that
+    // produces those silence-frame substitutions -- audible as exactly
+    // the kind of short, regular glitch being reported. Logged
+    // immediately per run (with its actual duration), not deferred to
+    // the next periodic summary, since the run's start/length is the
+    // whole point of this and averaging it into a 5-second window would
+    // destroy that information.
     if (log.isVerbose()) {
       const bytesPerSec = bitrateBps / 8;
+      let minStage1Since = stage1.readableLength;
+      let minStage2Since = opusStream.readableLength;
       const bufferLogInterval = setInterval(() => {
         const netSec = (stage1.readableLength / bytesPerSec).toFixed(1);
         const targetSec = config.prebufferSeconds.toFixed(1);
         const stallMs = opusStream.readableLength * OPUS_FRAME_MS;
+        const minNetSec = (minStage1Since / bytesPerSec).toFixed(1);
+        const minStallMs = minStage2Since * OPUS_FRAME_MS;
         log.debug(
           `player:${this.guildId}`,
-          `${track.videoId} buffered: net ${netSec}/${targetSec}s, stall ${stallMs}/${config.stallBufferMs}ms`
+          `[stage1] ${track.videoId} net ${netSec}/${targetSec}s (min since last log: ${minNetSec}s)`
         );
+        log.debug(
+          `player:${this.guildId}`,
+          `[stage2] ${track.videoId} stall ${stallMs}/${config.stallBufferMs}ms (min since last log: ${minStallMs}ms)`
+        );
+        minStage1Since = stage1.readableLength;
+        minStage2Since = opusStream.readableLength;
       }, 5000);
-      const stopBufferLog = () => clearInterval(bufferLogInterval);
+
+      let consecutiveEmptyPolls = 0;
+      let runStartedAt = null;
+      const starveMonitor = setInterval(() => {
+        minStage1Since = Math.min(minStage1Since, stage1.readableLength);
+        minStage2Since = Math.min(minStage2Since, opusStream.readableLength);
+        if (opusStream.readableLength > 0) {
+          if (consecutiveEmptyPolls > 0) {
+            log.debug(
+              `player:${this.guildId}`,
+              `[stage2] ${track.videoId} STARVE end: empty for ${consecutiveEmptyPolls} consecutive ` +
+              `${OPUS_FRAME_MS}ms poll(s) (~${consecutiveEmptyPolls * OPUS_FRAME_MS}ms), ` +
+              `started ${Date.now() - runStartedAt}ms ago -- @discordjs/voice substituted silence frames for this span`
+            );
+          }
+          consecutiveEmptyPolls = 0;
+          runStartedAt = null;
+          return;
+        }
+        if (consecutiveEmptyPolls === 0) {
+          runStartedAt = Date.now();
+          log.debug(`player:${this.guildId}`, `[stage2] ${track.videoId} STARVE start: empty`);
+        }
+        consecutiveEmptyPolls++;
+      }, OPUS_FRAME_MS);
+
+      const stopBufferLog = () => {
+        clearInterval(bufferLogInterval);
+        clearInterval(starveMonitor);
+      };
       opusStream.once('end', stopBufferLog);
       opusStream.once('error', stopBufferLog);
       opusStream.once('close', stopBufferLog);

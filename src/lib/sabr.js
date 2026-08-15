@@ -42,11 +42,39 @@ const SABR_MAX_RETRIES = 3;
 // on longer playback -- "after an amount of time" is the reported
 // symptom. Treated the same way as a reload below: reconnect with a
 // freshly re-minted token instead of erroring the track out.
+// Two more added after auditing every throw site in installed
+// googlevideo@4.0.4's SabrStream.js (setupStreamingProcess /
+// fetchAndProcessSegments / processStreamingResponse / checkForStall):
+// - 'Stream stalled 5 times, aborting': checkForStall() throws this after
+//   MAX_STALLS (5) consecutive no-progress checks at DEFAULT_STALL_DETECTION_MS
+//   (30000ms) intervals -- a real, recoverable network stall (~2.5 min of no
+//   progress), not a fatal condition, but previously fell through to
+//   controller.error() and killed the track instead of reconnecting.
+// - 'No valid parts received from server.': fetchAndProcessSegments() throws
+//   this when a response parses to zero UMP parts at all (empty/garbage
+//   response) -- same transient-network shape as the other three, previously
+//   uncaught here.
+// Both go through executeWithRetry's normal 3-attempt backoff first (see
+// SABR_MAX_RETRIES below) before ever reaching this relay, so by the time
+// either surfaces here the in-library retries have already been exhausted --
+// reconnecting via refetchInfo is the same recovery path already used for
+// reload/attestation, not a weaker fallback.
 const RECOVERABLE_SABR_ERROR_MESSAGES = new Set([
   'Player response reload requested by server',
   'No media parts or protocol updates received from server.',
   'Cannot proceed with stream: attestation required',
+  'Stream stalled 5 times, aborting',
+  'No valid parts received from server.',
 ]);
+
+// Caps total reconnect attempts per track. Without this, a recoverable
+// condition that keeps recurring after every reconnect (e.g. attestation
+// required again immediately on the fresh session) loops forever --
+// refetchInfo/refetchPoToken get hammered indefinitely and the track never
+// actually plays or fails. Confirmed against installed source: nothing in
+// SabrStream itself bounds this, since each reconnect is a brand-new
+// instance with its own fresh retry budget.
+const MAX_SABR_RECONNECT_ATTEMPTS = 5;
 
 /**
  * Picks which SABR-eligible audio format to request. Pulled out as a pure
@@ -100,7 +128,7 @@ function chooseAudioFormat(formats, preferredItag) {
  *   The video-ID-bound PO token -- same one used for the direct-URL GVS
  *   fetch (see player.js: getPoToken(track.videoId)). NOT the
  *   session/visitor_data-bound one.
- * @param {{ preferredItag?: number, refetchInfo?: () => Promise<import('youtubei.js').VideoInfo | import('youtubei.js').TrackInfo>, refetchPoToken?: () => Promise<string> }} [opts]
+ * @param {{ preferredItag?: number, refetchInfo?: () => Promise<import('youtubei.js').VideoInfo | import('youtubei.js').TrackInfo>, refetchPoToken?: () => Promise<string>, stallDetectionMs?: number }} [opts]
  *   preferredItag: itag of the format info.chooseFormat() already chose
  *   for direct download, see chooseAudioFormat() above.
  *   refetchInfo: called on a recoverable mid-stream failure (server
@@ -115,6 +143,10 @@ function chooseAudioFormat(formats, preferredItag) {
  *   `() => getPoToken(track.videoId)`). If omitted, the original
  *   `poToken` is reused on reconnect -- fine for a reload, but won't
  *   help if the token itself is what went stale.
+ *   stallDetectionMs: forwarded to SabrStream's own stall-detection
+ *   window (default 30000ms in the library). Exists so tests can force a
+ *   stall quickly instead of waiting minutes; production callers should
+ *   normally leave this unset.
  * @returns {Promise<{
  *   audioStream: ReadableStream<Uint8Array>,
  *   format: import('googlevideo/shared-types').SabrFormat,
@@ -219,7 +251,7 @@ async function deriveSabrParams(info, session) {
  * hard failure.
  * @private
  */
-async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState) {
+async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs) {
   const stream = new SabrStream({
     serverAbrStreamingUrl: params.serverAbrStreamingUrl,
     videoPlaybackUstreamerConfig: params.videoPlaybackUstreamerConfig,
@@ -278,6 +310,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
       enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
       maxRetries: SABR_MAX_RETRIES,
       state: resumeState,
+      stallDetectionMs,
     }));
   } catch (err) {
     // Synchronous throw from selectFormats() (bad/empty format list) --
@@ -298,9 +331,9 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   };
 }
 
-async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken } = {}) {
+async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken, stallDetectionMs } = {}) {
   const params = await deriveSabrParams(info, session);
-  let attempt = await startSabrAttempt(params, clientInfo, poToken, preferredItag, undefined);
+  let attempt = await startSabrAttempt(params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs);
   let currentPoToken = poToken;
 
   // Whether the selected format is Opus-coded is now the CALLER's
@@ -327,6 +360,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
 
   let currentReader = attempt.audioStream.getReader();
   let aborted = false;
+  let reconnectAttempts = 0;
 
   // Async fetch/UMP-processing errors (network failures, server-sent
   // SABR_ERROR parts, stalls, retries exhausted, etc.) do NOT throw from
@@ -362,10 +396,18 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             controller.error(err);
             return;
           }
+          if (reconnectAttempts >= MAX_SABR_RECONNECT_ATTEMPTS) {
+            controller.error(
+              new Error(`buildSabrAudioStream: gave up after ${MAX_SABR_RECONNECT_ATTEMPTS} reconnect attempts (last error: ${err.message})`)
+            );
+            return;
+          }
+          reconnectAttempts++;
           const reloadState = attempt.getReloadState();
           console.warn(
             `buildSabrAudioStream: recoverable SABR failure mid-stream (${err.message}) -- ` +
-            `reconnecting${reloadState ? ' with resumed playback position' : ' from a cold start (no resumable state captured)'}` +
+            `reconnecting (attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS})` +
+            `${reloadState ? ' with resumed playback position' : ' from a cold start (no resumable state captured)'}` +
             `${refetchPoToken ? ', re-minting PO token' : ''}`
           );
           try {
@@ -379,7 +421,8 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
               clientInfo,
               currentPoToken,
               audioFormat.itag,
-              reloadState || undefined
+              reloadState || undefined,
+              stallDetectionMs
             );
             currentReader = attempt.audioStream.getReader();
             continue; // retry the read against the newly reconnected stream
@@ -394,6 +437,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
           controller.close();
           return;
         }
+        if (process.env.SABR_DEBUG_ENQUEUE) console.error('[ENQUEUE]', result.value.length, 'bytes, first4=', Buffer.from(result.value.slice(0,4)).toString('hex'));
         controller.enqueue(result.value);
         return;
       }

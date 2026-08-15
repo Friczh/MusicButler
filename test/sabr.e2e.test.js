@@ -670,3 +670,286 @@ test('SABR e2e: buildSabrAudioStream survives a stale PO token (STREAM_PROTECTIO
   assert.equal(starvedResponsesSent, STARVE_COUNT, 'sanity check: the mock must have exhausted all retry attempts while starved of media');
   assert.equal(refetchPoTokenCalls, 1, 'refetchPoToken must be called exactly once to recover from the stale token');
 });
+
+test('SABR e2e: buildSabrAudioStream gives up after MAX_SABR_RECONNECT_ATTEMPTS instead of reconnecting forever', async () => {
+  // Simulates a recoverable condition (server reload) that keeps recurring
+  // on every reconnect attempt too -- e.g. a session permanently flagged
+  // server-side. Before the reconnect cap, this looped indefinitely,
+  // silently hammering refetchInfo/PO-token minting and never surfacing a
+  // failure. Only the init segment is ever served; every subsequent
+  // request (pre- AND post-reconnect) reloads.
+  const fileBuffer = fs.readFileSync(FIXTURE_PATH);
+  const audioFormat = makeAudioFormat(fileBuffer.length);
+  const initSize = 1500;
+  const segmentSize = 1800;
+  const initBytes = fileBuffer.subarray(0, initSize);
+  const restBytes = fileBuffer.subarray(initSize);
+  const mediaSegments = [];
+  for (let i = 0; i < restBytes.length; i += segmentSize) {
+    mediaSegments.push(restBytes.subarray(i, i + segmentSize));
+  }
+
+  let reloadResponsesSent = 0;
+  let refetchInfoCalls = 0;
+
+  const fetchFn = async (_url, options) => {
+    const bodyBytes = new Uint8Array(
+      options.body instanceof ArrayBuffer ? options.body : await new Response(options.body).arrayBuffer()
+    );
+    const req = VideoPlaybackAbrRequest.decode(bodyBytes);
+    const playerTimeMs = parseInt(req.clientAbrState?.playerTimeMs || '0');
+
+    const parts = [];
+    parts.push(part(UMPPartId.NEXT_REQUEST_POLICY, NextRequestPolicy.encode({
+      targetAudioReadaheadMs: 15000,
+      targetVideoReadaheadMs: 15000,
+      backoffTimeMs: 0,
+      playbackCookie: { resolution: 0, field2: 0, videoFmt: VIDEO_FORMAT, audioFmt: audioFormat },
+      videoId: '',
+    }).finish()));
+
+    if (playerTimeMs === 0) {
+      // Bundles the first real media segment (nonzero duration) alongside
+      // the init segment, same as the RELOAD_PLAYER_RESPONSE test above --
+      // required so playerTimeMs advances past 0 on the NEXT request.
+      // Without this, the mock's own `playerTimeMs === 0` branch above
+      // re-fires forever and the reload branch below is never reached at
+      // all (confirmed by direct reproduction against the real SabrStream
+      // before writing this test).
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: audioFormat,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: String(mediaSegments.length),
+        mimeType: audioFormat.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: VIDEO_FORMAT,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: '0',
+        mimeType: VIDEO_FORMAT.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(mediaHeaderPart(0, 0, 0, 0, 0, initBytes.length, true, audioFormat));
+      parts.push(mediaPart(0, initBytes));
+      parts.push(mediaEndPart(0));
+      const durationMs = Math.round(1000 / mediaSegments.length);
+      parts.push(mediaHeaderPart(1, 1, 0, durationMs, initSize, mediaSegments[0].length, false, audioFormat));
+      parts.push(mediaPart(1, mediaSegments[0]));
+      parts.push(mediaEndPart(1));
+    } else {
+      // Reload unconditionally, forever -- every request past the init one
+      // fails the same way, no matter how many times the caller reconnects.
+      reloadResponsesSent++;
+      parts.push(part(UMPPartId.RELOAD_PLAYER_RESPONSE, ReloadPlaybackContext.encode({
+        reloadPlaybackParams: { token: 'test-reload-token' },
+      }).finish()));
+    }
+
+    const buffer = new CompositeBuffer();
+    const writer = new UmpWriter(buffer);
+    for (const p of parts) writer.write(p.partType, p.partData);
+    return new Response(concatenateChunks(buffer.chunks), {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.yt-ump' },
+    });
+  };
+
+  const info = {
+    streaming_data: {
+      server_abr_streaming_url: 'https://test.invalid/sabr-reload-forever',
+      adaptive_formats: [VIDEO_FORMAT, audioFormat],
+    },
+    player_config: {
+      media_common_config: {
+        media_ustreamer_request_config: { video_playback_ustreamer_config: 'abc' },
+      },
+    },
+  };
+  const refetchInfo = async () => {
+    refetchInfoCalls++;
+    return info;
+  };
+
+  const originalFetch = global.fetch;
+  global.fetch = fetchFn;
+  try {
+    const { audioStream } = await buildSabrAudioStream(
+      info,
+      MOCK_SESSION,
+      CLIENT_INFO,
+      'abc',
+      { refetchInfo }
+    );
+
+    const reader = audioStream.getReader();
+    await assert.rejects(
+      async () => {
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      },
+      /gave up after 5 reconnect attempts/
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  // Exactly 5 reconnects means exactly 6 SabrStream instances total
+  // (initial + 5 reconnects). Each instance exhausts SABR_MAX_RETRIES (3)
+  // before giving up -- i.e. 4 attempts, all hitting the reload -- so
+  // 6 instances * 4 attempts = 24 total reload responses.
+  assert.equal(refetchInfoCalls, 5, 'must stop calling refetchInfo after exactly MAX_SABR_RECONNECT_ATTEMPTS reconnects');
+  assert.equal(reloadResponsesSent, 24, 'sanity check: 6 SabrStream instances each exhausting all 4 retry attempts on the reload');
+});
+
+test('SABR e2e: buildSabrAudioStream treats a mid-stream stall as recoverable and reconnects instead of failing the track', async () => {
+  // Exercises the message added to RECOVERABLE_SABR_ERROR_MESSAGES after
+  // auditing every throw site in installed SabrStream.js: checkForStall()
+  // throws "Stream stalled 5 times, aborting" after MAX_STALLS consecutive
+  // no-progress checks. A very low stallDetectionMs makes this trigger in
+  // milliseconds instead of the real ~2.5 minutes.
+  //
+  // Unlike the reload/attestation cases, checkForStall's throw is NOT
+  // wired to any event SabrStream emits (only 'reloadPlayerResponse' and
+  // 'streamProtectionStatusUpdate' proactively capture resumable state --
+  // confirmed against installed source), so a stall-triggered reconnect
+  // always starts cold. This mock reflects that: every playerTimeMs===0
+  // request re-sends the init segment AND the first media segment bundled
+  // together (required so playerTimeMs genuinely advances past 0 on the
+  // NEXT request -- without this the mock's own zero-duration init leaves
+  // playerTimeMs stuck at 0 forever, which either loops or false-triggers
+  // the stall detector for the wrong reason). The very first non-zero
+  // request stalls (no media, forcing checkForStall to fire); every one
+  // after that serves the next segment in order, so the post-reconnect
+  // instance completes a full, byte-correct cold download of the file.
+  const fileBuffer = fs.readFileSync(FIXTURE_PATH);
+  const audioFormat = makeAudioFormat(fileBuffer.length);
+  const initSize = 1500;
+  const segmentSize = 1800;
+  const initBytes = fileBuffer.subarray(0, initSize);
+  const restBytes = fileBuffer.subarray(initSize);
+  const mediaSegments = [];
+  for (let i = 0; i < restBytes.length; i += segmentSize) {
+    mediaSegments.push(restBytes.subarray(i, i + segmentSize));
+  }
+  assert.ok(mediaSegments.length >= 3, 'fixture must split into at least 3 media segments for this test to be meaningful');
+
+  const segDurationMs = Math.round(1000 / mediaSegments.length);
+  // Cursor into mediaSegments for post-init delivery -- starts at 1
+  // because index 0 is always bundled with the init segment itself.
+  let nextSegmentIndex = 1;
+  let stalledOnce = false;
+
+  const fetchFn = async (_url, options) => {
+    const bodyBytes = new Uint8Array(
+      options.body instanceof ArrayBuffer ? options.body : await new Response(options.body).arrayBuffer()
+    );
+    const req = VideoPlaybackAbrRequest.decode(bodyBytes);
+    const playerTimeMs = parseInt(req.clientAbrState?.playerTimeMs || '0');
+
+    const parts = [];
+    parts.push(part(UMPPartId.NEXT_REQUEST_POLICY, NextRequestPolicy.encode({
+      targetAudioReadaheadMs: 15000,
+      targetVideoReadaheadMs: 15000,
+      backoffTimeMs: 0,
+      playbackCookie: { resolution: 0, field2: 0, videoFmt: VIDEO_FORMAT, audioFmt: audioFormat },
+      videoId: '',
+    }).finish()));
+
+    if (playerTimeMs === 0) {
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: audioFormat,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: String(mediaSegments.length),
+        mimeType: audioFormat.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(part(UMPPartId.FORMAT_INITIALIZATION_METADATA, FormatInitializationMetadata.encode({
+        formatId: VIDEO_FORMAT,
+        durationUnits: '1000',
+        durationTimescale: '1000',
+        endSegmentNumber: '0',
+        mimeType: VIDEO_FORMAT.mimeType,
+        endTimeMs: '1000',
+        videoId: '',
+      }).finish()));
+      parts.push(mediaHeaderPart(0, 0, 0, 0, 0, initBytes.length, true, audioFormat));
+      parts.push(mediaPart(0, initBytes));
+      parts.push(mediaEndPart(0));
+      parts.push(mediaHeaderPart(1, 1, 0, segDurationMs, initSize, mediaSegments[0].length, false, audioFormat));
+      parts.push(mediaPart(1, mediaSegments[0]));
+      parts.push(mediaEndPart(1));
+    } else if (!stalledOnce) {
+      // First non-init request: no media at all -- checkForStall's
+      // no-progress branch fires repeatedly until it gives up.
+      stalledOnce = true;
+    } else if (nextSegmentIndex < mediaSegments.length) {
+      const seg = mediaSegments[nextSegmentIndex];
+      const headerId = nextSegmentIndex + 1;
+      const startMs = nextSegmentIndex * segDurationMs;
+      const startRange = initSize + mediaSegments.slice(0, nextSegmentIndex).reduce((s, m) => s + m.length, 0);
+      parts.push(mediaHeaderPart(headerId, nextSegmentIndex + 1, startMs, segDurationMs, startRange, seg.length, false, audioFormat));
+      parts.push(mediaPart(headerId, seg));
+      parts.push(mediaEndPart(headerId));
+      nextSegmentIndex++;
+    }
+
+    const buffer = new CompositeBuffer();
+    const writer = new UmpWriter(buffer);
+    for (const p of parts) writer.write(p.partType, p.partData);
+    return new Response(concatenateChunks(buffer.chunks), {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.yt-ump' },
+    });
+  };
+
+  const info = {
+    streaming_data: {
+      server_abr_streaming_url: 'https://test.invalid/sabr-stall',
+      adaptive_formats: [VIDEO_FORMAT, audioFormat],
+    },
+    player_config: {
+      media_common_config: {
+        media_ustreamer_request_config: { video_playback_ustreamer_config: 'abc' },
+      },
+    },
+  };
+  const refetchInfo = async () => info;
+
+  const originalFetch = global.fetch;
+  global.fetch = fetchFn;
+  let audioStream;
+  let reassembled;
+  try {
+    ({ audioStream } = await buildSabrAudioStream(
+      info,
+      MOCK_SESSION,
+      CLIENT_INFO,
+      'abc',
+      { refetchInfo, stallDetectionMs: 1 }
+    ));
+
+    const reader = audioStream.getReader();
+    const chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+    }
+    reassembled = Buffer.concat(chunks);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.equal(reassembled.length, fileBuffer.length, 'stall-triggered reconnect must still deliver the complete file');
+  assert.ok(reassembled.equals(fileBuffer), 'bytes across the stall boundary must reassemble identically to the source file');
+  assert.ok(stalledOnce, 'sanity check: the mock must have actually induced a stall');
+});
