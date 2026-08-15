@@ -76,6 +76,7 @@ function buildPanelComponents({ isPaused = false, repeatMode = 'off', shuffleAct
         .setCustomId('panel_shuffle')
         .setEmoji(getIcon(shuffleActive ? 'shuffle_on' : 'shuffle_off'))
         .setStyle(ButtonStyle.Secondary)
+        .setStyle(shuffleActive ? ButtonStyle.Success : ButtonStyle.Secondary)
     ),
   ];
 }
