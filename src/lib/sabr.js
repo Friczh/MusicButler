@@ -11,7 +11,30 @@
 // require(esm) has been unflagged and stable since Node 20.19.0 / 22.12.0,
 // confirmed on the Dockerfile's node:20-bookworm-slim base.
 const { SabrStream } = require('googlevideo/sabr-stream');
-const { buildSabrFormat, EnabledTrackTypes } = require('googlevideo/utils');
+const { buildSabrFormat, EnabledTrackTypes, Logger, LogLevel } = require('googlevideo/utils');
+const { log } = require('./log');
+
+// googlevideo's own internal Logger (a process-wide singleton, confirmed
+// against installed googlevideo@4.0.4 source: utils/Logger.js) defaults
+// to ERROR+INFO only. WARN is NOT enabled by default -- and WARN is
+// exactly where every individual segment-fetch retry attempt gets logged
+// (SabrStream#executeWithRetry: "Segment fetch attempt N/M failed --
+// retrying in Xms"). That silently swallowed the one piece of evidence
+// that would explain a disconnect: with WARN off, the log jumps straight
+// from nothing to the final "Maximum retries (N) exceeded ..." ERROR
+// line, with zero visibility into what actually failed on each attempt
+// leading up to it -- indistinguishable from a single hard failure.
+// Routed through MB_VERBOSE (this project's own verbosity toggle, see
+// log.js) rather than left at the library default or forced to ALL
+// unconditionally: WARN+ERROR+INFO always on (retry attempts and
+// lifecycle events are the actual diagnostic signal for disconnects),
+// full DEBUG (backoff waits, per-part decoding) only under MB_VERBOSE
+// since that tier is genuinely noisy per-request detail.
+Logger.getInstance().setLogLevels(
+  ...(log.isVerbose()
+    ? [LogLevel.ALL]
+    : [LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO])
+);
 
 // SabrStream's own internal retry (executeWithRetry) keeps hitting the SAME
 // request up to `maxRetries` times (default 10) before giving up -- for a
@@ -269,6 +292,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   // deferred to whenever the caller notices the stream errored.
   let reloadState = null;
   stream.on('reloadPlayerResponse', () => {
+    log.error('sabr', 'server sent RELOAD_PLAYER_RESPONSE mid-stream (session invalidated) -- capturing resumable state, reconnect will follow');
     captureReloadState();
   });
   // Attestation-pending/required (see RECOVERABLE_SABR_ERROR_MESSAGES
@@ -280,7 +304,15 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   // every status-2/3 update, same as the reload listener, rather than
   // trying to capture it after the fact.
   stream.on('streamProtectionStatusUpdate', (status) => {
-    if (status?.status >= 2) captureReloadState();
+    if (status?.status >= 2) {
+      log.error(
+        'sabr',
+        `stream protection status ${status.status} (${status.status === 2 ? 'attestation pending' : 'attestation required'}) -- capturing resumable state, reconnect will follow`
+      );
+      captureReloadState();
+    } else {
+      log.debug('sabr', `stream protection status update: ${status?.status}`);
+    }
   });
   function captureReloadState() {
     try {
@@ -292,6 +324,13 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
       reloadState = null;
     }
   }
+
+  stream.on('formatInitialization', (initializedFormat) => {
+    const fmt = initializedFormat?.formatInitializationMetadata?.formatId;
+    log.debug('sabr', `format initialized: itag ${fmt?.itag}, lastModified ${fmt?.lastModified}`);
+  });
+
+  log.debug('sabr', `starting attempt${resumeState ? ' (resuming from captured state)' : ' (cold start)'}, preferredItag ${preferredItag}`);
 
   let selectedFormats;
   let audioStream;
@@ -412,13 +451,29 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
               onReconnectEnd?.();
             }
           };
-          if (!RECOVERABLE_SABR_ERROR_MESSAGES.has(err.message) || !refetchInfo) {
+          // Previously silent here -- on an UNrecoverable failure this
+          // relay's own catch was the ONLY place that ever saw the raw
+          // error before it got wrapped by whatever generic "pipeline
+          // error"/"prebuffer stage failed" handler downstream happened
+          // to catch it (player.js), losing the SABR-specific context
+          // (reconnect attempts already made, elapsed time this attempt
+          // had been running) in the process. Logged unconditionally
+          // (log.error, not gated by MB_VERBOSE) since this is exactly
+          // the "disconnected after N seconds" signal being chased.
+          const recoverable = RECOVERABLE_SABR_ERROR_MESSAGES.has(err.message) && !!refetchInfo;
+          log.error(
+            'sabr',
+            `mid-stream read failure: ${err.message} -- ` +
+            `${recoverable ? `recoverable, attempting reconnect (${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS} used so far)` : 'NOT recoverable, terminating track'}`
+          );
+          if (!recoverable) {
             clearReconnectFlag();
             controller.error(err);
             return;
           }
           if (reconnectAttempts >= MAX_SABR_RECONNECT_ATTEMPTS) {
             clearReconnectFlag();
+            log.error('sabr', `giving up: reconnect attempts exhausted (${MAX_SABR_RECONNECT_ATTEMPTS}/${MAX_SABR_RECONNECT_ATTEMPTS})`);
             controller.error(
               new Error(`buildSabrAudioStream: gave up after ${MAX_SABR_RECONNECT_ATTEMPTS} reconnect attempts (last error: ${err.message})`)
             );
@@ -452,6 +507,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             continue; // retry the read against the newly reconnected stream
           } catch (reconnectErr) {
             clearReconnectFlag();
+            log.error('sabr', `reconnect attempt failed outright (could not re-establish stream): ${reconnectErr.message}`);
             controller.error(
               new Error(`buildSabrAudioStream: reload reconnect failed: ${reconnectErr.message}`)
             );
@@ -464,6 +520,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
         }
         if (awaitingFirstChunkAfterReconnect) {
           awaitingFirstChunkAfterReconnect = false;
+          log.info('sabr', `reconnect succeeded (attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS}), first chunk received`);
           onReconnectEnd?.();
         }
         if (process.env.SABR_DEBUG_ENQUEUE) console.error('[ENQUEUE]', result.value.length, 'bytes, first4=', Buffer.from(result.value.slice(0,4)).toString('hex'));
