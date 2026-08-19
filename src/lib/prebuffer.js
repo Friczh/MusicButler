@@ -58,16 +58,9 @@ class PrebufferTransform extends Transform {
 
   /**
    * Releases whatever's buffered right now, without waiting for
-   * targetBytes. For use when a caller has decided to stop waiting (e.g.
-   * a prebuffer timeout) but stage1 itself has no way to know that on its
-   * own — without this, _transform keeps withholding data until
-   * targetBytes is eventually reached regardless of any timeout the
-   * caller applied, silently defeating the point of giving up early.
-   *
-   * Safe to call from outside a _transform/_flush callback: unlike
-   * _release (which hands its data back via the Transform callback
-   * machinery), this pushes directly via this.push(), which Transform
-   * (as a Duplex) allows at any time, not just mid-_transform.
+   * targetBytes -- for a caller that gave up waiting (e.g. a timeout).
+   * Safe to call anytime, not just mid-_transform, since it pushes via
+   * this.push() directly rather than the _transform callback.
    */
   forceRelease() {
     if (this._released) return;

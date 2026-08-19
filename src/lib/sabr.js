@@ -1,87 +1,36 @@
 'use strict';
 
-// SABR fallback path. youtubei.js's own info.download()/chooseFormat() only
-// handle direct-URL and ciphered formats -- confirmed against installed
-// youtubei.js@17.2.0 source, there is no UMP/SABR client in that package at
-// all. The actual SABR protocol client lives in `googlevideo` (npm), the
-// same author's companion library, specifically its SabrStream class
-// (googlevideo/sabr-stream). Both packages are ESM-only ("type": "module")
-// but requiring them via CJS `require()` works the same way
-// require('youtubei.js') already does elsewhere in this project -- Node's
-// require(esm) has been unflagged and stable since Node 20.19.0 / 22.12.0,
-// confirmed on the Dockerfile's node:20-bookworm-slim base.
+// SABR fallback path — youtubei.js has no UMP/SABR client; that lives in
+// `googlevideo` (SabrStream). Both are ESM-only; CJS require() works fine
+// on Node 20.19+/22.12+.
 const { SabrStream } = require('googlevideo/sabr-stream');
-const { buildSabrFormat, EnabledTrackTypes, Logger, LogLevel } = require('googlevideo/utils');
+const { buildSabrFormat, EnabledTrackTypes } = require('googlevideo/utils');
 const { log } = require('./log');
 
-// googlevideo's own internal Logger (a process-wide singleton, confirmed
-// against installed googlevideo@4.0.4 source: utils/Logger.js) defaults
-// to ERROR+INFO only. WARN is NOT enabled by default -- and WARN is
-// exactly where every individual segment-fetch retry attempt gets logged
-// (SabrStream#executeWithRetry: "Segment fetch attempt N/M failed --
-// retrying in Xms"). That silently swallowed the one piece of evidence
-// that would explain a disconnect: with WARN off, the log jumps straight
-// from nothing to the final "Maximum retries (N) exceeded ..." ERROR
-// line, with zero visibility into what actually failed on each attempt
-// leading up to it -- indistinguishable from a single hard failure.
-// Routed through MB_VERBOSE (this project's own verbosity toggle, see
-// log.js) rather than left at the library default or forced to ALL
-// unconditionally: WARN+ERROR+INFO always on (retry attempts and
-// lifecycle events are the actual diagnostic signal for disconnects),
-// full DEBUG (backoff waits, per-part decoding) only under MB_VERBOSE
-// since that tier is genuinely noisy per-request detail.
-Logger.getInstance().setLogLevels(
-  ...(log.isVerbose()
-    ? [LogLevel.ALL]
-    : [LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO])
-);
+// Never log a full PO token. Fingerprint lets us confirm session vs video
+// tokens actually differ, and whether a "refresh" really changed anything.
+function tokenFingerprint(token) {
+  if (!token) return '<none>';
+  return `len=${token.length} tail=…${token.slice(-6)}`;
+}
 
-// SabrStream's own internal retry (executeWithRetry) keeps hitting the SAME
-// request up to `maxRetries` times (default 10) before giving up -- for a
-// genuine server-requested reload (RELOAD_PLAYER_RESPONSE), every one of
-// those retries is doomed, since the session itself was invalidated, not
-// just one flaky request. Confirmed against installed googlevideo@4.0.4
-// source (SabrStream#executeWithRetry: backoff = min(500 * 2^(attempt-1),
-// 8000ms), attempted maxRetries+1 times total) -- at the default of 10,
-// exhausting retries before the reload-reconnect logic below even gets a
-// chance to run takes ~59s of silent stall. Lowered here so a real reload
-// hands off to reconnection in a few seconds instead of most of a minute
-// of dead air.
+const PROTECTION_STATUS_LABELS = {
+  0: 'OK',
+  1: 'RECHECK_REQUIRED',
+  2: 'ATTESTATION_PENDING',
+  3: 'ATTESTATION_REQUIRED',
+};
+
+// SabrStream's internal retry hits the same doomed request up to 10x
+// (~59s) before a real reload/attestation failure ever reaches our own
+// reconnect logic below. Lowered so reconnect kicks in within seconds.
 const SABR_MAX_RETRIES = 3;
 
-// Distinct failure mode from RELOAD_PLAYER_RESPONSE, discovered from a real
-// production log ("Maximum retries (10) exceeded while fetching segment:
-// No media parts or protocol updates received from server."), confirmed
-// against installed googlevideo@4.0.4 source
-// (SabrStream#fetchAndProcessSegments / #handleStreamProtectionStatus):
-// the server can send a STREAM_PROTECTION_STATUS part with status 2
-// ("attestation pending") or 3 ("attestation required"); once that
-// happens, SabrStream starts throwing on any subsequent response that
-// doesn't carry an actual MEDIA part -- and since it retries the exact
-// same request/token unchanged, a request stuck in this state never
-// recovers on its own. This lines up with the video-bound PO token
-// (minted once per track via getPoToken(videoId) in player.js, distinct
-// from the session-level visitor_data-bound token) going stale mid-track
-// on longer playback -- "after an amount of time" is the reported
-// symptom. Treated the same way as a reload below: reconnect with a
-// freshly re-minted token instead of erroring the track out.
-// Two more added after auditing every throw site in installed
-// googlevideo@4.0.4's SabrStream.js (setupStreamingProcess /
-// fetchAndProcessSegments / processStreamingResponse / checkForStall):
-// - 'Stream stalled 5 times, aborting': checkForStall() throws this after
-//   MAX_STALLS (5) consecutive no-progress checks at DEFAULT_STALL_DETECTION_MS
-//   (30000ms) intervals -- a real, recoverable network stall (~2.5 min of no
-//   progress), not a fatal condition, but previously fell through to
-//   controller.error() and killed the track instead of reconnecting.
-// - 'No valid parts received from server.': fetchAndProcessSegments() throws
-//   this when a response parses to zero UMP parts at all (empty/garbage
-//   response) -- same transient-network shape as the other three, previously
-//   uncaught here.
-// Both go through executeWithRetry's normal 3-attempt backoff first (see
-// SABR_MAX_RETRIES below) before ever reaching this relay, so by the time
-// either surfaces here the in-library retries have already been exhausted --
-// reconnecting via refetchInfo is the same recovery path already used for
-// reload/attestation, not a weaker fallback.
+// Errors treated as recoverable (reconnect instead of failing the track).
+// Confirmed by auditing every throw site in googlevideo@4.0.4's
+// SabrStream.js. Covers: server-requested reload, attestation stuck
+// pending/required (often a stale video-bound PO token), a stall after
+// 5 no-progress checks, and a response that parsed to zero UMP parts.
 const RECOVERABLE_SABR_ERROR_MESSAGES = new Set([
   'Player response reload requested by server',
   'No media parts or protocol updates received from server.',
@@ -90,45 +39,21 @@ const RECOVERABLE_SABR_ERROR_MESSAGES = new Set([
   'No valid parts received from server.',
 ]);
 
-// Caps total reconnect attempts per track. Without this, a recoverable
-// condition that keeps recurring after every reconnect (e.g. attestation
-// required again immediately on the fresh session) loops forever --
-// refetchInfo/refetchPoToken get hammered indefinitely and the track never
-// actually plays or fails. Confirmed against installed source: nothing in
-// SabrStream itself bounds this, since each reconnect is a brand-new
-// instance with its own fresh retry budget.
+// Caps reconnect attempts so a condition that keeps recurring (e.g.
+// attestation failing again on every fresh session) can't loop forever.
 const MAX_SABR_RECONNECT_ATTEMPTS = 5;
 
 /**
- * Picks which SABR-eligible audio format to request. Pulled out as a pure
- * function (no network) so it's directly unit-testable, and so the
- * selection logic is visible independent of SabrStream's own plumbing.
- *
- * When `preferredItag` is given -- normally the itag of the exact webm/
- * opus format info.chooseFormat() already picked for direct download in
- * player.js -- and that itag is present in `formats`, it's used as-is.
- * This guarantees the SABR fallback fetches the IDENTICAL container/codec
- * direct-download would have used, rather than re-deriving its own pick
- * independently (the previous behavior): the two paths could otherwise
- * select different formats, and if SABR's own opus-mimeType heuristic
- * ever failed to find an opus candidate, it fell back to "best bitrate,
- * any codec" -- which could hand a non-WebM (e.g. AAC/mp4a) payload to
- * prism-media's WebmDemuxer, which only ever parses WebM/EBML and errors
- * immediately on anything else.
- *
- * @param {Array<import('googlevideo/shared-types').SabrFormat>} formats
- *   Already filtered to audio-only by SabrStream/chooseFormat internally.
- * @param {number} [preferredItag]
- * @returns {import('googlevideo/shared-types').SabrFormat | undefined}
+ * Picks the SABR audio format to request. If `preferredItag` (the itag
+ * direct-download already chose) is present, use it exactly — keeps both
+ * paths on the identical container/codec instead of possibly mismatching
+ * (e.g. SABR falling back to non-WebM, which the WebM demuxer can't read).
+ * Otherwise: best-bitrate Opus, or best-bitrate of any codec if no Opus.
  */
 function chooseAudioFormat(formats, preferredItag) {
   if (preferredItag) {
     const exact = formats.find((f) => f.itag === preferredItag);
     if (exact) return exact;
-    // Falls through to the heuristic below -- e.g. the direct-download
-    // pick came from streaming_data.formats (the rarely-populated legacy
-    // muxed list) rather than adaptive_formats, so it has no SABR-side
-    // counterpart at all.
   }
   const opusOnly = formats.filter((f) => f.mimeType?.includes('opus'));
   const pool = opusOnly.length ? opusOnly : formats;
@@ -136,76 +61,26 @@ function chooseAudioFormat(formats, preferredItag) {
 }
 
 /**
- * Builds a raw (fragmented) webm/opus audio ReadableStream for a track
- * whose direct-URL download failed, using YouTube's SABR/UMP protocol.
+ * Builds a raw webm/opus (or other codec) audio ReadableStream via SABR,
+ * for a track whose direct-URL download failed.
  *
  * @param {import('youtubei.js').VideoInfo | import('youtubei.js').TrackInfo} info
- *   Result of session.getInfo()/session.music.getInfo() -- same `info`
- *   object the direct-download path already has, no extra fetch needed.
  * @param {import('youtubei.js').Innertube} session
- *   The Innertube wrapper -- needed for session.session.player.decipher()
- *   to transform server_abr_streaming_url's n-sig before use.
  * @param {{ clientName: number, clientVersion: string }} clientInfo
- *   From innertube.js's getSabrClientInfo(session, clientType).
- * @param {string} poToken
- *   The video-ID-bound PO token -- same one used for the direct-URL GVS
- *   fetch (see player.js: getPoToken(track.videoId)). NOT the
- *   session/visitor_data-bound one.
- * @param {{ preferredItag?: number, refetchInfo?: () => Promise<import('youtubei.js').VideoInfo | import('youtubei.js').TrackInfo>, refetchPoToken?: () => Promise<string>, stallDetectionMs?: number }} [opts]
- *   preferredItag: itag of the format info.chooseFormat() already chose
- *   for direct download, see chooseAudioFormat() above.
- *   refetchInfo: called on a recoverable mid-stream failure (server
- *   reload request, or the video-bound PO token going stale -- see
- *   RECOVERABLE_SABR_ERROR_MESSAGES above) to fetch a fresh `info` for
- *   the SAME track (e.g. `() => session.getInfo(track.videoId)`/
- *   `session.music.getInfo(...)`, matching whichever call originally
- *   produced `info`). Without this, these failures surface as a normal
- *   stream error, ending the track early.
- *   refetchPoToken: called alongside refetchInfo on the same recoverable
- *   failures to re-mint the video-bound PO token (e.g.
- *   `() => getPoToken(track.videoId)`). If omitted, the original
- *   `poToken` is reused on reconnect -- fine for a reload, but won't
- *   help if the token itself is what went stale.
- *   stallDetectionMs: forwarded to SabrStream's own stall-detection
- *   window (default 30000ms in the library). Exists so tests can force a
- *   stall quickly instead of waiting minutes; production callers should
- *   normally leave this unset.
- * @returns {Promise<{
- *   audioStream: ReadableStream<Uint8Array>,
- *   format: import('googlevideo/shared-types').SabrFormat,
- *   abort: () => void,
- * }>}
- *   `format` is the actual selected SABR audio format -- callers must
- *   check `format.mimeType` to decide whether the returned stream is
- *   WebM/Opus (route through buildOpusPipeline()) or something else,
- *   e.g. fMP4/AAC (route through buildTranscodedOpusPipeline() instead),
- *   see demuxPipeline.js.
- *   `abort` stops the underlying SabrStream's background segment-fetch
- *   loop. Confirmed against installed source (googlevideo@4.0.4's
- *   SabrStream constructor): the ReadableStream wrapping `audioStream`
- *   has no `cancel` handler wired up at all, so destroying/cancelling
- *   the Node stream this gets wrapped into (e.g. via Readable.fromWeb(),
- *   as player.js does) does NOT stop the fetch loop -- only calling
- *   `.abort()` on the SabrStream INSTANCE itself does. Callers must call
- *   this on any downstream failure or track skip, or the fetch loop
- *   keeps running/fetching after nothing is consuming it.
+ * @param {string} poToken video-ID-bound token, not the session one.
+ * @param {{ preferredItag?: number, refetchInfo?: Function, refetchPoToken?: Function, stallDetectionMs?: number, onReconnectStart?: Function, onReconnectEnd?: Function }} [opts]
+ *   refetchInfo/refetchPoToken: called on a recoverable mid-stream failure
+ *   to re-fetch info/token and reconnect seamlessly instead of erroring.
+ * @returns {Promise<{ audioStream: ReadableStream<Uint8Array>, format: object, abort: () => void }>}
+ *   `format.mimeType` tells the caller whether to demux as-is (Opus) or
+ *   transcode (anything else). `abort` must be called on skip/failure —
+ *   cancelling the wrapped Node stream alone does not stop the fetch loop.
  */
 /**
- * Derives the per-attempt SABR request parameters (deciphered streaming
- * URL, ustreamer config, format list) from an `info` object. Split out of
- * buildSabrAudioStream() so a reload-reconnect can re-derive these from a
- * freshly refetched `info` without duplicating the extraction/validation
- * logic (see buildSabrAudioStream's relay loop below).
- *
- * Order matters here: all three cheap, synchronous field checks run BEFORE
- * the decipher() call, which is the one async, session-dependent step.
- * This keeps a malformed/non-SABR response failing fast without touching
- * `session` at all -- required so the existing guard-clause unit tests
- * (sabr.test.js) keep passing without needing a real session object, since
- * those tests only exist to exercise these validation branches.
- *
- * @param {import('youtubei.js').VideoInfo | import('youtubei.js').TrackInfo} info
- * @param {import('youtubei.js').Innertube} session
+ * Derives per-attempt SABR params (deciphered URL, ustreamer config,
+ * format list) from `info`. Split out so a reconnect can re-derive from
+ * fresh info without duplicating validation. Sync field checks run before
+ * the one async step (decipher) so bad input fails fast.
  * @private
  */
 async function deriveSabrParams(info, session) {
@@ -217,13 +92,8 @@ async function deriveSabrParams(info, session) {
     );
   }
 
-  // NOT nested inside streaming_data -- confirmed against installed
-  // youtubei.js source (parser/parser.js line ~296 + core/mixins/
-  // MediaInfo.js line ~63): it's a sibling field on `info.player_config`,
-  // assembled from playerConfig.mediaCommonConfig.mediaUstreamerRequestConfig
-  // .videoPlaybackUstreamerConfig in the raw player response. VideoInfo
-  // and TrackInfo both go through the same MediaInfo mixin, so this path
-  // is identical for regular YouTube and YouTube Music tracks.
+  // Sibling field on info.player_config, not nested in streaming_data.
+  // Same path for both regular YouTube and YT Music (shared MediaInfo mixin).
   const videoPlaybackUstreamerConfig =
     info.player_config?.media_common_config?.media_ustreamer_request_config?.video_playback_ustreamer_config;
   if (!videoPlaybackUstreamerConfig) {
@@ -232,12 +102,8 @@ async function deriveSabrParams(info, session) {
     );
   }
 
-  // ALL adaptive formats (audio + video), not just audio ones. Confirmed
-  // by direct test against installed googlevideo@4.0.4:
-  // SabrStream#selectFormats() throws "No suitable formats found for
-  // download" if EITHER track type has zero candidates in the formats
-  // list, even though only audio will actually be fetched below. The
-  // video pick is real but gets discarded via enabledTrackTypes.
+  // Needs both audio AND video candidates -- SabrStream#selectFormats()
+  // throws if either track type is empty, even though only audio is used.
   const sabrFormats = (streamingData.adaptive_formats || []).map(buildSabrFormat);
   if (!sabrFormats.some((f) => f.mimeType?.includes('video'))) {
     throw new Error(
@@ -245,36 +111,26 @@ async function deriveSabrParams(info, session) {
     );
   }
 
-  // CRITICAL: server_abr_streaming_url carries the same n-sig cipher as
-  // regular adaptive_formats URLs and MUST be deciphered before use --
-  // confirmed against the googlevideo/shaka-player reference integration
-  // (LuanRT/sabr-shaka-example, main.ts), which calls
-  // `session.player.decipher(streaming_data.server_abr_streaming_url)`
-  // before handing the URL to SabrStream. youtubei.js's Player.decipher()
-  // reads the `n` query param and runs it through the player's nsig
-  // transform (core/Player.js); skipping this leaves a stale/invalid `n`
-  // on the URL, which the CDN rejects outright -- this was the actual
-  // cause of the "SabrStream Maximum retries exceeded: Server returned
-  // 403 Forbidden" production failure, not a token or IP issue.
-  // session.player.decipher() is on the real Session object, reached via
-  // the public `.session` getter on the Innertube wrapper class -- see
-  // player.js's po_token-mutation note for why `session.session` (not
-  // `session`) is required here.
+  // Must decipher the n-sig cipher before use, same as any adaptive_formats
+  // URL, or the CDN rejects the request with 403.
   const serverAbrStreamingUrl = await session.session.player.decipher(rawServerAbrStreamingUrl);
 
   return { serverAbrStreamingUrl, videoPlaybackUstreamerConfig, sabrFormats };
 }
 
 /**
- * Starts one SABR attempt (fresh, or resumed from a captured `state`) and
- * wires up reload-request capture on it. `state`/reload plumbing exists
- * because YouTube can send a mid-stream RELOAD_PLAYER_RESPONSE UMP part
- * (session invalidated server-side) -- see buildSabrAudioStream's relay
- * loop for how a reload is turned into a seamless reconnect instead of a
- * hard failure.
+ * Starts one SABR attempt (fresh, or resumed from a captured `state`).
+ * Wires up reload-request capture, since YouTube can invalidate the
+ * session mid-stream via RELOAD_PLAYER_RESPONSE.
  * @private
  */
 async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs) {
+  const attemptStartedAt = Date.now();
+  log.debug(
+    'sabr',
+    `starting SabrStream attempt -- poToken ${tokenFingerprint(poToken)}, ` +
+    `resumed=${!!resumeState}, preferredItag=${preferredItag ?? '<none>'}`
+  );
   const stream = new SabrStream({
     serverAbrStreamingUrl: params.serverAbrStreamingUrl,
     videoPlaybackUstreamerConfig: params.videoPlaybackUstreamerConfig,
@@ -283,67 +139,47 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
     formats: params.sabrFormats,
   });
 
-  // Captured synchronously INSIDE the 'reloadPlayerResponse' listener --
-  // confirmed against installed source (SabrStream#handleReloadPlayerResponse):
-  // the emit() call happens synchronously, immediately before the throw
-  // that unwinds up to setupStreamingProcess()'s catch/finally, and that
-  // finally block calls resetState() unconditionally. getState() has to
-  // run before that reset wipes the very state it reads, so it can't be
-  // deferred to whenever the caller notices the stream errored.
+  // Must capture state synchronously inside the event listener -- the
+  // library resets it right after emitting, before our catch block runs.
   let reloadState = null;
   stream.on('reloadPlayerResponse', () => {
-    log.error('sabr', 'server sent RELOAD_PLAYER_RESPONSE mid-stream (session invalidated) -- capturing resumable state, reconnect will follow');
+    log.debug('sabr', `reloadPlayerResponse event received (${Date.now() - attemptStartedAt}ms into this attempt)`);
     captureReloadState();
   });
-  // Attestation-pending/required (see RECOVERABLE_SABR_ERROR_MESSAGES
-  // above) has no dedicated event -- STREAM_PROTECTION_STATUS only emits
-  // 'streamProtectionStatusUpdate', it doesn't itself throw for status 2,
-  // and by the time the eventual "No media parts..." error reaches the
-  // relay loop's catch block below, resetState() has already run in
-  // setupStreamingProcess()'s finally. So capture state proactively on
-  // every status-2/3 update, same as the reload listener, rather than
-  // trying to capture it after the fact.
+  // Attestation pending/required has no dedicated failure event -- only
+  // this status update -- so state is captured proactively here too.
+  // Logged at every status (not just >=2) so a capture shows the full
+  // transition sequence (e.g. resolves on its own vs. stays stuck).
   stream.on('streamProtectionStatusUpdate', (status) => {
+    const label = PROTECTION_STATUS_LABELS[status?.status] ?? `UNKNOWN(${status?.status})`;
+    log.debug(
+      'sabr',
+      `streamProtectionStatusUpdate: status=${status?.status} (${label}), ` +
+      `${Date.now() - attemptStartedAt}ms into this attempt`
+    );
     if (status?.status >= 2) {
       log.error(
         'sabr',
-        `stream protection status ${status.status} (${status.status === 2 ? 'attestation pending' : 'attestation required'}) -- capturing resumable state, reconnect will follow`
+        `attestation status ${label} on this attempt -- poToken ${tokenFingerprint(poToken)}`
       );
       captureReloadState();
-    } else {
-      log.debug('sabr', `stream protection status update: ${status?.status}`);
     }
   });
   function captureReloadState() {
     try {
       reloadState = stream.getState();
     } catch (err) {
-      // getState() throws if the main format never initialized yet (the
-      // event arrived before the very first segment) -- nothing to
-      // resume from in that case; the reconnect below just starts cold.
+      // Nothing to resume from if the event fired before the first segment.
       reloadState = null;
     }
   }
 
-  stream.on('formatInitialization', (initializedFormat) => {
-    const fmt = initializedFormat?.formatInitializationMetadata?.formatId;
-    log.debug('sabr', `format initialized: itag ${fmt?.itag}, lastModified ${fmt?.lastModified}`);
-  });
-
-  log.debug('sabr', `starting attempt${resumeState ? ' (resuming from captured state)' : ' (cold start)'}, preferredItag ${preferredItag}`);
-
   let selectedFormats;
   let audioStream;
   try {
-    // IMPORTANT: do not pass preferWebM/preferMP4/preferH264 as top-level
-    // start() options. Confirmed by direct test: those preferences apply
-    // to BOTH the audio AND video candidate lists inside
-    // SabrStream#selectFormats(), and this project only cares about
-    // audio -- if the video-format candidates don't happen to match the
-    // preferred container, selectFormats() throws even though the video
-    // pick is discarded a moment later. Container/codec preference for
-    // audio must be scoped to the audioFormat selector function only,
-    // leaving video selection unconstrained (defaults to best-by-height).
+    // Don't pass preferWebM/MP4/H264 as top-level start() options -- they
+    // constrain BOTH audio and video candidates, and the video pick (which
+    // gets discarded anyway) can fail to match, breaking selection entirely.
     ({ audioStream, selectedFormats } = await stream.start({
       audioFormat: (formats) => chooseAudioFormat(formats, preferredItag),
       enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
@@ -352,15 +188,18 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
       stallDetectionMs,
     }));
   } catch (err) {
-    // Synchronous throw from selectFormats() (bad/empty format list) --
-    // distinct from the async mid-stream errors below, which surface
-    // later through the returned ReadableStream itself, not here.
     throw new Error(`buildSabrAudioStream: SabrStream.start() failed during format selection: ${err.message}`);
   }
 
   if (!selectedFormats?.audioFormat) {
     throw new Error('buildSabrAudioStream: SabrStream selected no audio format');
   }
+
+  log.debug(
+    'sabr',
+    `attempt started successfully in ${Date.now() - attemptStartedAt}ms -- ` +
+    `selected itag ${selectedFormats.audioFormat.itag}, mimeType ${selectedFormats.audioFormat.mimeType}`
+  );
 
   return {
     stream,
@@ -371,63 +210,37 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
 }
 
 async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken, stallDetectionMs, onReconnectStart, onReconnectEnd } = {}) {
+  const trackStartedAt = Date.now();
   const params = await deriveSabrParams(info, session);
   let attempt = await startSabrAttempt(params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs);
   let currentPoToken = poToken;
+  // Lets reconnect logging show the gap between loop iterations.
+  let lastReconnectAt = trackStartedAt;
 
-  // Whether the selected format is Opus-coded is now the CALLER's
-  // decision, not this function's -- returned alongside the stream
-  // rather than gating it. chooseAudioFormat() above falls back to "best
-  // bitrate, any codec" when there's no Opus candidate at all among the
-  // SABR-eligible formats (this happens for real: YouTube increasingly
-  // serves SABR-only WEB responses whose only audio track is AAC/mp4a,
-  // with no Opus alternative). player.js now routes a non-Opus result
-  // through buildTranscodedOpusPipeline() (FFmpeg decode + Opus
-  // re-encode, see demuxPipeline.js) instead of buildOpusPipeline()'s
-  // plain WebM demuxer, so this no longer aborts/fails here for that
-  // case.
+  // Whether Opus or not is the caller's decision (routes to a different
+  // pipeline in player.js) -- this just returns the format either way.
   //
-  // This first attempt's format selection is now FIXED for the whole
-  // track: every reload-reconnect attempt below re-requests this exact
-  // itag via preferredItag, because SabrStream#restoreState() matches
-  // resumed state against the newly selected format's key and rejects it
-  // on a mismatch (confirmed against installed source) -- switching
-  // formats mid-track would desync from the captured state and silently
-  // fall back to a cold restart (audible gap) instead of a seamless
-  // splice.
+  // Fixed for the whole track: every reconnect re-requests this exact
+  // itag, since resumed state only matches against the same format key.
   const audioFormat = attempt.selectedFormats.audioFormat;
 
   let currentReader = attempt.audioStream.getReader();
   let aborted = false;
   let reconnectAttempts = 0;
-  // Set the moment a reconnect begins, cleared once the reconnected
-  // stream's first chunk actually reaches enqueue() -- NOT at the moment
-  // the new SabrStream instance starts, since "started" and "has data"
-  // aren't the same thing (see startSabrAttempt: the first real fetch
-  // still has to complete). onReconnectEnd firing on "started" instead
-  // of "has data" would tell the caller it's safe to un-pause before
-  // anything is actually ready to play, defeating the point.
+  // True from the moment a reconnect starts until its first real chunk
+  // arrives -- lets onReconnectEnd fire on "has data", not just "started".
   let awaitingFirstChunkAfterReconnect = false;
+  // True once any chunk has ever been delivered for this track. Tells
+  // apart "never played at all" from "played fine, then started looping".
+  let sawFirstChunk = false;
 
-  // Async fetch/UMP-processing errors (network failures, server-sent
-  // SABR_ERROR parts, stalls, retries exhausted, etc.) do NOT throw from
-  // start() above -- it kicks off the actual segment-fetching loop in the
-  // background and returns immediately. Confirmed against installed
-  // source (SabrStream#errorHandler): failures call
-  // audioController.error(err), which is what makes reader.read() reject
-  // below, once the background loop actually hits one.
+  // start() above doesn't throw on async failures -- it kicks off the
+  // background fetch loop and returns immediately. Failures surface here,
+  // through reader.read() rejecting.
   //
-  // Everything is relayed through this OWN ReadableStream instead of
-  // returning SabrStream's audioStream directly. That's what makes these
-  // failures invisible to player.js: on a genuine post-retry-exhaustion
-  // error whose message matches RECOVERABLE_SABR_ERROR_MESSAGES (as
-  // opposed to some other, non-recoverable fetch failure), a fresh
-  // `info` (and PO token) is pulled via `refetchInfo`/`refetchPoToken`, a
-  // new SabrStream is started resumed from the captured state, and
-  // pumping continues into this SAME outer stream -- player.js's 'error'
-  // listener on the wrapped Node stream never fires at all, instead of
-  // it treating the failure as "this track failed" and ending playback
-  // early.
+  // Recoverable failures are handled by pumping into this SAME outer
+  // stream after a reconnect, so player.js's error handling never sees
+  // them -- from its side, the track just kept playing.
   const relay = new ReadableStream({
     async pull(controller) {
       for (;;) {
@@ -439,51 +252,47 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             controller.close();
             return;
           }
-          // Whichever of the three ways this can end in failure below,
-          // the pause onReconnectStart triggered (if any) must not be
-          // left stuck forever with no matching onReconnectEnd -- the
-          // track is about to hard-error regardless, but the caller's
-          // paused AudioPlayer has no other way to find out recovery
-          // isn't coming.
+          // Don't leave a paused AudioPlayer stuck if we're about to hard-error.
           const clearReconnectFlag = () => {
             if (awaitingFirstChunkAfterReconnect) {
               awaitingFirstChunkAfterReconnect = false;
               onReconnectEnd?.();
             }
           };
-          // Previously silent here -- on an UNrecoverable failure this
-          // relay's own catch was the ONLY place that ever saw the raw
-          // error before it got wrapped by whatever generic "pipeline
-          // error"/"prebuffer stage failed" handler downstream happened
-          // to catch it (player.js), losing the SABR-specific context
-          // (reconnect attempts already made, elapsed time this attempt
-          // had been running) in the process. Logged unconditionally
-          // (log.error, not gated by MB_VERBOSE) since this is exactly
-          // the "disconnected after N seconds" signal being chased.
-          const recoverable = RECOVERABLE_SABR_ERROR_MESSAGES.has(err.message) && !!refetchInfo;
-          log.error(
-            'sabr',
-            `mid-stream read failure: ${err.message} -- ` +
-            `${recoverable ? `recoverable, attempting reconnect (${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS} used so far)` : 'NOT recoverable, terminating track'}`
-          );
-          if (!recoverable) {
+          if (!RECOVERABLE_SABR_ERROR_MESSAGES.has(err.message) || !refetchInfo) {
+            log.error(
+              'sabr',
+              `non-recoverable SABR failure (${err.message}) -- ` +
+              `${Date.now() - trackStartedAt}ms since track start, ${reconnectAttempts} prior reconnects, ` +
+              `refetchInfo=${!!refetchInfo}`
+            );
             clearReconnectFlag();
             controller.error(err);
             return;
           }
+          const now = Date.now();
+          const sinceLastReconnect = now - lastReconnectAt;
+          const sinceTrackStart = now - trackStartedAt;
           if (reconnectAttempts >= MAX_SABR_RECONNECT_ATTEMPTS) {
+            log.error(
+              'sabr',
+              `giving up after ${MAX_SABR_RECONNECT_ATTEMPTS} reconnect attempts -- ` +
+              `${sinceTrackStart}ms since track start, last reconnect ${sinceLastReconnect}ms ago, ` +
+              `everPlayedAnyAudio=${sawFirstChunk}, last error: ${err.message}`
+            );
             clearReconnectFlag();
-            log.error('sabr', `giving up: reconnect attempts exhausted (${MAX_SABR_RECONNECT_ATTEMPTS}/${MAX_SABR_RECONNECT_ATTEMPTS})`);
             controller.error(
               new Error(`buildSabrAudioStream: gave up after ${MAX_SABR_RECONNECT_ATTEMPTS} reconnect attempts (last error: ${err.message})`)
             );
             return;
           }
           reconnectAttempts++;
+          lastReconnectAt = now;
           const reloadState = attempt.getReloadState();
           console.warn(
             `buildSabrAudioStream: recoverable SABR failure mid-stream (${err.message}) -- ` +
-            `reconnecting (attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS})` +
+            `reconnecting (attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS}), ` +
+            `${sinceTrackStart}ms since track start, ${sinceLastReconnect}ms since last reconnect` +
             `${reloadState ? ' with resumed playback position' : ' from a cold start (no resumable state captured)'}` +
             `${refetchPoToken ? ', re-minting PO token' : ''}`
           );
@@ -491,7 +300,13 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
           awaitingFirstChunkAfterReconnect = true;
           try {
             if (refetchPoToken) {
+              const previousToken = currentPoToken;
               currentPoToken = await refetchPoToken();
+              log.debug(
+                'sabr',
+                `re-minted PO token: ${tokenFingerprint(previousToken)} -> ${tokenFingerprint(currentPoToken)}` +
+                `${previousToken === currentPoToken ? ' (WARNING: identical to previous token -- refresh may not be working)' : ''}`
+              );
             }
             const freshInfo = await refetchInfo();
             const freshParams = await deriveSabrParams(freshInfo, session);
@@ -506,8 +321,11 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
             currentReader = attempt.audioStream.getReader();
             continue; // retry the read against the newly reconnected stream
           } catch (reconnectErr) {
+            log.error(
+              'sabr',
+              `reconnect attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS} itself failed: ${reconnectErr.message}`
+            );
             clearReconnectFlag();
-            log.error('sabr', `reconnect attempt failed outright (could not re-establish stream): ${reconnectErr.message}`);
             controller.error(
               new Error(`buildSabrAudioStream: reload reconnect failed: ${reconnectErr.message}`)
             );
@@ -520,8 +338,15 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
         }
         if (awaitingFirstChunkAfterReconnect) {
           awaitingFirstChunkAfterReconnect = false;
-          log.info('sabr', `reconnect succeeded (attempt ${reconnectAttempts}/${MAX_SABR_RECONNECT_ATTEMPTS}), first chunk received`);
           onReconnectEnd?.();
+        }
+        if (!sawFirstChunk) {
+          sawFirstChunk = true;
+          log.debug(
+            'sabr',
+            `first real media chunk received ${Date.now() - trackStartedAt}ms after track start ` +
+            `(${reconnectAttempts} reconnects so far) -- attestation/format selection confirmed resolved`
+          );
         }
         if (process.env.SABR_DEBUG_ENQUEUE) console.error('[ENQUEUE]', result.value.length, 'bytes, first4=', Buffer.from(result.value.slice(0,4)).toString('hex'));
         controller.enqueue(result.value);
@@ -534,18 +359,9 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
     },
   });
 
-  // `abort` stops the CURRENTLY ACTIVE underlying SabrStream's background
-  // segment-fetch loop (reassigned on every reload-reconnect above, so
-  // this always targets the live one, not a stale pre-reload instance).
-  // Confirmed against installed source (googlevideo@4.0.4's SabrStream
-  // constructor): the ReadableStream wrapping `audioStream` has no
-  // `cancel` handler wired up at all, so destroying/cancelling the Node
-  // stream this gets wrapped into (e.g. via Readable.fromWeb(), as
-  // player.js does) does NOT stop the fetch loop on its own -- it relies
-  // on this relay's own `cancel()` above calling `.abort()` on the real
-  // instance. Callers must still call this `abort` on any downstream
-  // failure or track skip, or the fetch loop keeps running/fetching after
-  // nothing is consuming it.
+  // `abort` targets whichever SabrStream instance is currently live
+  // (reassigned on each reconnect). Required -- cancelling the Node stream
+  // this gets wrapped into does NOT stop the background fetch loop itself.
   return {
     audioStream: relay,
     format: audioFormat,

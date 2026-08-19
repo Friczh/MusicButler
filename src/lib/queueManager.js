@@ -1,9 +1,7 @@
 'use strict';
 
 const REPEAT_MODES = ['off', 'all', 'one'];
-// Bounded so a long-running session with repeat off (or on, for that
-// matter) can't grow this array forever -- it's cheap per-track (small
-// objects), but there's no reason to keep more than this many.
+// Caps history growth over a long-running session.
 const MAX_HISTORY = 500;
 
 class GuildQueue {
@@ -12,35 +10,21 @@ class GuildQueue {
     /** @type {Array<object>} */
     this.tracks = [];
     this.playing = null;
-    // Every track that has finished playing, in play order -- recorded
-    // unconditionally in next(), regardless of what repeatMode was
-    // active at the time. This is what repeat-all pulls from once
-    // `tracks` runs dry, which is the whole point: if repeat-all only
-    // remembered tracks that finished while it was already on, turning
-    // it on partway through a session would strand whatever had already
-    // played, and repeat-all would end up only looping the most recent
-    // song instead of the actual queue. See next().
+    // Every finished track, in play order, recorded unconditionally in
+    // next() -- what repeat-all refills from once `tracks` runs dry.
     this.history = [];
-    // Bumped on every skip/leave/clear-on-disconnect so an in-flight
-    // extraction that was already running for a track can detect it's
-    // stale and avoid clobbering whatever plays next.
+    // Bumped on skip/leave/clear so a stale in-flight extraction can
+    // detect it and avoid clobbering whatever plays next.
     this.generation = 0;
     this.voiceChannelId = null;
     this.textChannelId = null;
-    // ID of the currently-live control panel message in textChannelId, if
-    // any -- see panel.js. Repost-on-track-change replaces this; leaving/
-    // /clearmessage clears it out via messageCleanup.js.
+    // ID of the live control panel message in textChannelId, if any.
     this.panelMessageId = null;
-    // 'off' | 'all' (loop the whole queue, including whatever's currently
-    // playing) | 'one' (loop just the current track) -- honored here in
-    // next() (repeat-all) and in player.js's _playNext() (repeat-one,
-    // which never touches history -- it replays the same track object
-    // directly without going through next() at all).
+    // 'off' | 'all' | 'one' -- honored in next() (repeat-all) and in
+    // player.js's _playNext() (repeat-one, which bypasses next() entirely).
     this.repeatMode = 'off';
-    // Toggle state for shuffle (see toggleShuffle()). When active,
-    // originalOrder holds a snapshot of `tracks` from just before the
-    // shuffle was applied, by reference, so turning shuffle back off can
-    // restore the pre-shuffle order instead of leaving it randomized.
+    // originalOrder snapshots `tracks` right before shuffle is applied,
+    // so turning shuffle off restores the pre-shuffle order.
     this.shuffleActive = false;
     /** @type {Array<object>|null} */
     this.originalOrder = null;
@@ -64,21 +48,16 @@ class GuildQueue {
   }
 
   next() {
-    // Record whatever was just playing into history BEFORE replacing it
-    // -- unconditionally, regardless of repeatMode right now. This is
-    // the fix: repeat-all needs to be able to loop back to tracks that
-    // finished before it was even turned on, not just ones that finish
-    // while it's already active. Silent tracks (grantop's rickroll) are
-    // a one-off hijack, not part of the real queue, so they're excluded.
+    // Record unconditionally (regardless of current repeatMode) so
+    // repeat-all can loop back to tracks that finished before it was
+    // turned on. Silent/easter-egg tracks are excluded.
     if (this.playing && !this.playing.silent) {
       this.history.push(this.playing);
       if (this.history.length > MAX_HISTORY) this.history.shift();
     }
 
     if (this.tracks.length === 0 && this.repeatMode === 'all' && this.history.length > 0) {
-      // Upcoming queue is empty but repeat-all is on -- refill it from
-      // everything that's been played this session, in original order,
-      // and start the cycle over.
+      // Refill from everything played this session, restart the cycle.
       this.tracks.push(...this.history);
       this.history = [];
     }
@@ -124,19 +103,11 @@ class GuildQueue {
   }
 
   /**
-   * Toggles shuffle. Turning it on snapshots the current order and
-   * shuffles; turning it off restores that snapshot rather than leaving
-   * the queue randomized. Turning it on again from off re-snapshots
-   * whatever the (now-restored) order is and produces a fresh shuffle.
-   *
-   * Tracks added/removed while shuffle was active are reconciled by
-   * reference against the snapshot on restore: survivors keep their
-   * original relative order, anything new gets appended at the end.
-   *
-   * Refuses to turn on with 0 or 1 upcoming tracks -- state is left
-   * completely untouched (shuffleActive stays false) so callers don't
-   * end up rendering an "on" panel/button for something that didn't
-   * actually happen. Returns { active, count, refused }.
+   * Toggles shuffle: on snapshots + shuffles order, off restores the
+   * snapshot. Added/removed tracks during shuffle are reconciled by
+   * reference -- survivors keep order, new ones append at the end.
+   * Refuses to turn on with <=1 track (state untouched). Returns
+   * { active, count, refused }.
    */
   toggleShuffle() {
     if (!this.shuffleActive) {

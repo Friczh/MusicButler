@@ -68,11 +68,8 @@ async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
     throw new Error(`POT provider /get_pot failed: HTTP ${res.status} ${text}`);
   }
   const data = await res.json();
-  // The request body is snake_case (content_binding), but this binary's
-  // internal token struct uses camelCase (poToken/contentBinding/expiresAt
-  // — confirmed via `strings` on the actual release binary). Accepting
-  // both here rather than betting on one, since that inconsistency isn't
-  // documented anywhere and is easy to get wrong in either direction.
+  // Request body is snake_case, but the binary's response uses camelCase
+  // (poToken) inconsistently -- accepting both rather than betting on one.
   const token = (data && (data.po_token || data.poToken)) || null;
   if (!token || typeof token !== 'string' || token.length === 0) {
     throw new Error(`POT provider /get_pot response missing po_token/poToken: ${JSON.stringify(data)}`);

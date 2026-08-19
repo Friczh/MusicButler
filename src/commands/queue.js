@@ -11,12 +11,8 @@ const {
 const { getIcon, getIconText } = require('../lib/icons');
 
 const PAGE_SIZE = 25;
-// Root cause of the 50035 crash: replying with a plain string built from
-// `tracks.map(...).join('\n')` has no length cap -- a queue past ~40-60
-// tracks (title-length dependent) blows past Discord's 2000-char message
-// content limit and the reply throws instead of sending. Embeds cap at
-// 4096 chars for description, but the real fix is just not dumping the
-// whole queue into one message at all -- paginate it.
+// A plain-string reply with no length cap blows past Discord's 2000-char
+// limit past ~40-60 tracks -- paginate instead.
 const COLLECTOR_TIMEOUT_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 5000;
 

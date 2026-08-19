@@ -4,31 +4,13 @@ const { Innertube, UniversalCache, Platform, ClientType, Constants, Parser } = r
 const { getPoToken } = require('./potProvider');
 const { decodeCookiesEnv } = require('./cookies');
 
-// youtubei.js never bundles a JS interpreter for deciphering YouTube's
-// obfuscated signature-cipher code (needed for MediaInfo#download on
-// ciphered formats) — this is required in Node.js too, not just browsers,
-// per the current docs (ytjs.dev/guide/getting-started, "Providing a
-// Custom JavaScript Interpreter"). Without this, download() throws
-// "you must provide your own JavaScript evaluator". `Function` is a
-// Node.js global, safe to use here the same as the docs' example.
+// youtubei.js requires a JS evaluator for deciphering signature-cipher
+// formats, even in Node.js -- without this, download() throws.
 Platform.shim.eval = async (data) => new Function(data.output)();
 
-// youtubei.js's default parser ERROR_HANDLER (parser/parser.js) logs a
-// multi-line dump per warning -- full stack trace, and for the common
-// "class_not_found"/"typecheck" cases (a UI panel this package version
-// has no parser class for yet, e.g. the "Ask" AI sidebar seen in prod
-// logs) it also prints the entire JIT-introspected TypeScript class body.
-// These are non-fatal by design -- confirmed against installed source,
-// this handler only ever logs and returns null, it never throws, and
-// getInfo()/music.getInfo() completes normally either way (see
-// player.js's comment on this same warning). `setParserErrorHandler` is
-// youtubei.js's own supported override hook for this (parser/parser.js),
-// scoped to parser warnings only -- unlike Utils.Log.setLevel(), which
-// would silence ALL of youtubei.js's WARNING-level logs project-wide,
-// including genuinely useful ones unrelated to parsing.
-//
-// To go fully silent instead of one line, replace the body with a no-op:
-// Parser.setParserErrorHandler(() => {});
+// Replaces youtubei.js's default multi-line-dump parser warning with one
+// line. Non-fatal either way -- getInfo() still completes normally.
+// To go fully silent: Parser.setParserErrorHandler(() => {});
 Parser.setParserErrorHandler(({ classname, error_type, ...context }) => {
   let detail;
   switch (error_type) {
@@ -56,32 +38,17 @@ Parser.setParserErrorHandler(({ classname, error_type, ...context }) => {
   console.warn(`[youtubei.js parser] ${error_type}: ${classname} — ${detail}`);
 });
 
-// The session-bootstrap `client_type` option requires the RAW internal
-// client name (matched against Constants.CLIENTS[x].NAME), not the
-// friendly alias youtubei.js accepts as a per-call `{ client: '...' }'
-// override elsewhere (getInfo/search). Those are two different resolution
-// paths. Confirmed directly against the installed package's exported
-// ClientType enum (`node -e "console.log(require('youtubei.js').ClientType)"`)
-// after 'YTMUSIC' was rejected at runtime with "Unknown client name:
-// YTMUSIC." — the correct raw value is ClientType.MUSIC === 'WEB_REMIX'.
+// Session bootstrap needs the raw internal client name (ClientType enum),
+// not the friendly alias accepted elsewhere as a per-call override.
 const CLIENT_TYPE_FOR = {
   WEB: ClientType.WEB,
   YTMUSIC: ClientType.MUSIC,
 };
 
-// youtubei.js's `po_token` session option is bound to `visitor_data`, and
-// visitor_data itself is minted per client context — a token bootstrapped
-// under the default WEB client is NOT valid for a YTMUSIC-context request,
-// even though youtubei.js lets you pass `{ client: 'YTMUSIC' }` as a
-// per-call override on a WEB-bootstrapped session without complaining.
-// Confirmed the hard way: doing exactly that gets rejected by YouTube with
-// a non-2xx. Correct flow per client_type, each cached independently:
-//   1. Bootstrap an Innertube session with that specific `client_type` (no
-//      po_token yet) to obtain a visitor_data that's actually valid for
-//      that client context.
-//   2. Ask the POT provider for a token bound to that visitor_data.
-//   3. Recreate the session with { client_type, cookie, visitor_data,
-//      po_token }.
+// po_token is bound to visitor_data, which is minted per client context --
+// a WEB-bootstrapped token isn't valid for YTMUSIC requests. So: bootstrap
+// a session per client_type to get its visitor_data, mint a token bound
+// to that, then rebuild the session with both. Cached per client_type.
 const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5h
 
 let cookieHeader = null;
@@ -153,23 +120,10 @@ async function getSession({ clientType = 'WEB', forceRefresh = false } = {}) {
 }
 
 /**
- * Builds the `clientInfo` object googlevideo's SabrStream needs to
- * identify itself in SABR requests (StreamerContext_ClientInfo proto).
- *
- * `clientName` must be the numeric client ID, not the friendly name --
- * confirmed against installed youtubei.js source
- * (utils/Constants.js: CLIENT_NAME_IDS, keyed by the same raw NAME
- * values as CLIENT_TYPE_FOR above -- ClientType.WEB === 'WEB' === the
- * CLIENT_NAME_IDS key, so CLIENT_TYPE_FOR[clientType] is reused
- * directly as the lookup key here, no separate mapping needed).
- * CLIENT_NAME_IDS values are strings ('1', '67'); the proto field wants
- * a number.
- *
- * `clientVersion` is pulled from the already-bootstrapped session so it
- * matches whatever version string that session's requests are using --
- * confirmed via `session.session.client_version` getter
- * (core/Session.js), NOT a static constant.
- *
+ * Builds the `clientInfo` googlevideo's SabrStream needs to identify
+ * itself in SABR requests. `clientName` is the numeric client ID
+ * (Constants.CLIENT_NAME_IDS), not the friendly name. `clientVersion`
+ * comes from the already-bootstrapped session.
  * @param {import('youtubei.js').Innertube} session
  * @param {'WEB' | 'YTMUSIC'} clientType
  * @returns {{ clientName: number, clientVersion: string }}

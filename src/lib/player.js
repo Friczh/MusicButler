@@ -20,15 +20,9 @@ const { log } = require('./log');
 const { repostPanel, editPanelInPlace } = require('./panel');
 const { clearBotMessages } = require('./messageCleanup');
 
-// SabrStream itself throws this exact message internally when the server
-// sends a STREAM_PROTECTION_STATUS part with status 3 -- confirmed
-// against installed googlevideo source (SabrStream#handleStreamProtectionStatus).
-// This means YouTube is requiring a form of client attestation this bot
-// cannot satisfy (a bot-check/DRM gate), not a transient network problem
-// or a bug in this pipeline -- so it's worth a distinct, actionable log
-// line instead of blending into the generic "pipeline error" noise,
-// even though the actual handling (skip to the next track) is the same
-// either way.
+// SabrStream throws this exact message when the server requires
+// attestation (a bot-check/DRM gate) this bot can't satisfy -- worth a
+// distinct log line, even though the handling (skip the track) is the same.
 function isAttestationRequired(err) {
   return /attestation required/i.test(err?.message || '');
 }
@@ -55,40 +49,20 @@ class GuildPlayer {
     this._onIdleTimeout = onIdleTimeout;
     this.connection = null;
     this.audioPlayer = createAudioPlayer();
-    // The abort() hook for whatever track is currently playing/being
-    // built, IF it's using SABR (null otherwise) -- see sabr.js's
-    // buildSabrAudioStream() return value. Needed because destroying the
-    // Node stream wrapping SabrStream's output does NOT stop its
-    // background segment-fetch loop (no `cancel` handler wired on that
-    // ReadableStream -- confirmed against installed googlevideo source);
-    // only calling .abort() on the SabrStream instance itself does.
+    // abort() hook for the current SABR track (null if none/direct-URL).
+    // Destroying the Node stream alone doesn't stop SabrStream's
+    // background fetch loop -- only .abort() on the instance does.
     this._activeAbort = null;
-    // Set by skip() right before forcing Idle, read (and cleared) by the
-    // Idle listener below -- lets _playNext() tell a manual skip apart
-    // from a natural track-end, which matters for repeat-one (a manual
-    // skip should always advance, not replay the same track).
+    // Set by skip(), read/cleared by the Idle listener -- lets _playNext()
+    // tell a manual skip apart from a natural end (matters for repeat-one).
     this._pendingManualSkip = false;
-    // Set true only while a SABR mid-stream reconnect has us holding
-    // audioPlayer.pause() to dodge @discordjs/voice's own maxMissedFrames
-    // kill-switch (default 5 missed 20ms frames = 100ms tolerance -- far
-    // shorter than a reconnect can realistically take, confirmed against
-    // installed @discordjs/voice source: AudioPlayer._stepPrepare() calls
-    // this.stop() the instant that counter is hit, which is what was
-    // silently ending tracks a few seconds in on a recoverable SABR
-    // hiccup that had already succeeded reconnecting by the time the
-    // kill fired -- see _pauseForReconnect()/_unpauseAfterReconnect()).
-    // Only ever unpause automatically when THIS flag says WE were the
-    // one who paused -- never override a pause the user triggered via
-    // /pause, including one that happens to land in the middle of our
-    // own reconnect-pause window (see _pauseForReconnect()'s guard).
+    // True while we're holding audioPlayer.pause() during a SABR
+    // reconnect, to dodge @discordjs/voice's 5-missed-frame (100ms)
+    // kill-switch. Only auto-unpause if WE set this -- never override a
+    // user's own /pause.
     this._pausedForReconnect = false;
-    // "Alone in VC" timer -- see handleVoicePopulationChange(). Kept
-    // separate from _idleTimer below (they start independently -- the
-    // channel being empty doesn't itself mean playback is idle if a
-    // track happens to still be resolving/playing when the last human
-    // leaves, which is why pause() is called explicitly at that point).
-    // On rejoin, though, handleVoicePopulationChange() clears BOTH --
-    // see that method for why.
+    // "Alone in VC" timer, independent of _idleTimer below (see
+    // handleVoicePopulationChange()).
     this._aloneTimer = null;
     // "Nothing playing" timer -- see _startIdleTimer()/_clearIdleTimer().
     this._idleTimer = null;
@@ -164,21 +138,11 @@ class GuildPlayer {
   }
 
   /**
-   * Called from index.js's voiceStateUpdate handler on every population
-   * change in the bot's voice channel. `isEmpty` is whether any humans
-   * remain.
-   *
-   * Deliberately does NOT reset/restart an already-running alone timer on
-   * repeated "still empty" events (guarded by `if (this._aloneTimer)
-   * return` in _startAloneTimer()).
-   *
-   * On rejoin, BOTH timers are cleared -- a human coming back cancels the
-   * alone countdown (obviously) AND any independently-running idle
-   * countdown (e.g. one left over from an earlier pause/queue-drain
-   * before everyone left). Without this, a silent rejoin (someone comes
-   * back but doesn't hit Resume) could still get auto-kicked by the idle
-   * timer expiring underneath them, which defeats the point of coming
-   * back.
+   * Called from index.js's voiceStateUpdate handler on any population
+   * change in the bot's voice channel. `isEmpty` = no humans remain.
+   * On rejoin, clears BOTH timers -- not just the alone one -- so a
+   * silent rejoin (no explicit Resume) can't still get auto-kicked by a
+   * leftover idle countdown.
    */
   handleVoicePopulationChange(isEmpty) {
     if (isEmpty) {
@@ -204,9 +168,7 @@ class GuildPlayer {
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
       selfDeaf: true,
     });
-    // Discord connection state -- every hop the voice connection makes
-    // (Signalling -> Connecting -> Ready, or Disconnected/Destroyed on
-    // drop) on the way to being able to actually send audio.
+    // Logs every voice connection state hop (Signalling/Connecting/Ready/Disconnected).
     this.connection.on('stateChange', (oldState, newState) => {
       log.debug(`player:${this.guildId}`, `voice connection ${oldState.status} -> ${newState.status}`);
     });
@@ -272,29 +234,17 @@ class GuildPlayer {
     return this._activeAbort;
   }
 
-  /**
-   * Resolves+deciphers `track` into a playable resource without touching
-   * the queue or audioPlayer -- lets a caller build a resource ahead of
-   * time (in parallel with something else, e.g. freenitro's
-   * public taunt message) and swap it in later via swapInPrebuilt().
-   */
+  /** Builds a playable resource for `track` without touching queue/audioPlayer, so it can be built ahead of time and swapped in via swapInPrebuilt(). */
   async prepareResource(track) {
     return this._buildResource(track);
   }
 
   /**
-   * Swaps an already-built `resource` into playback immediately, ahead
-   * of everything else. `.play()` transitions directly from
-   * Playing/Buffering to Playing without an intermediate Idle state
-   * (confirmed against installed source: @discordjs/voice's AudioPlayer
-   * docstring -- "the player will not transition to the Idle state
-   * during the swap over"), so this can't race the Idle listener /
-   * _playNext(). Whatever was playing is pushed back to the front of the
-   * queue to resume after (from the start -- there's no seek/position
-   * tracking anywhere in this codebase, so "resume" always means
-   * "re-extract and replay from 0", same as a normal skip()).
-   *
-   * @param outgoingAbort - snapshotActiveAbort()'s return value, captured
+   * Swaps an already-built `resource` into playback immediately.
+   * `.play()` goes straight Playing -> Playing (no intermediate Idle),
+   * so this can't race the Idle listener. Whatever was playing is pushed
+   * back to the front of the queue to replay from the start after.
+   * @param outgoingAbort - snapshotActiveAbort()'s value, captured
    *   BEFORE prepareResource() ran for `track`.
    */
   swapInPrebuilt(track, resource, outgoingAbort) {
@@ -322,14 +272,7 @@ class GuildPlayer {
     );
   }
 
-  /**
-   * Wraps queue.setRepeatMode()/cycleRepeatMode() -- also clears the idle
-   * timer if repeat is now on. Needed for the case where the idle timer
-   * started BEFORE repeat was turned on (e.g. paused, then repeat
-   * enabled, then resumed) -- _startIdleTimer()'s repeatMode guard only
-   * stops NEW countdowns; this stops an already-running one from
-   * surviving into a now-repeating session.
-   */
+  /** Wraps queue.setRepeatMode(), also clearing any idle timer that started before repeat was turned on. */
   setRepeatMode(mode) {
     const applied = this.queue.setRepeatMode(mode);
     if (applied !== 'off') this._clearIdleTimer();
@@ -381,14 +324,7 @@ class GuildPlayer {
     return ok;
   }
 
-  /**
-   * Called from sabr.js's onReconnectStart during a mid-stream SABR
-   * reconnect. Only pauses (and only sets the flag) if the player is
-   * actually Playing right now -- if it's already Paused, that's a user
-   * pause already in effect, and we must not claim credit for it, or
-   * _unpauseAfterReconnect() would incorrectly undo the user's pause
-   * once the reconnect finishes.
-   */
+  /** SABR reconnect start (sabr.js onReconnectStart). Only pauses/sets the flag if actually Playing -- must not claim credit for a user's own /pause. */
   _pauseForReconnect() {
     if (this.audioPlayer.state.status === AudioPlayerStatus.Playing) {
       this.audioPlayer.pause();
@@ -405,14 +341,7 @@ class GuildPlayer {
     }
   }
 
-  /**
-   * Stops whatever SABR fetch loop the OUTGOING track (the one we're
-   * moving away from -- finished, skipped, or failed) left running, if
-   * any. Best-effort: SabrStream.abort() calls controller.error() on
-   * ReadableStream controllers that may already be closed (natural
-   * end-of-track), which can throw -- there's nothing useful to do about
-   * that here either way, so it's swallowed.
-   */
+  /** Stops the outgoing track's SABR fetch loop, if any. Best-effort -- abort() can throw on an already-closed stream, swallowed. */
   _abortActiveSabr() {
     const abort = this._activeAbort;
     this._activeAbort = null;
@@ -423,11 +352,7 @@ class GuildPlayer {
   }
 
   async _playNext({ manualSkip = false, isError = false } = {}) {
-    // Always runs first, unconditionally -- whether this call came from
-    // a natural track-end (Idle), an error, skip(), or disconnect()'s
-    // queue-clear, whatever SABR fetch loop the PREVIOUS track owned
-    // needs to be stopped before (maybe) starting the next one. See
-    // _abortActiveSabr().
+    // Always stop the previous track's SABR fetch loop first, regardless of why we're here.
     this._abortActiveSabr();
 
     const finished = this.queue.playing;
@@ -467,10 +392,21 @@ class GuildPlayer {
 
     const generation = this.queue.generation;
     let resource;
+    const buildStartedAt = Date.now();
     try {
       resource = await this._buildResource(track);
     } catch (err) {
-      console.error(`[player:${this.guildId}] extraction failed for ${track.videoId}:`, err.message);
+      // Logged with the videoId and elapsed time specifically so a
+      // MB_VERBOSE capture of a reported "disconnect loop" can be read back
+      // and answered definitively: is this the SAME videoId failing
+      // repeatedly (queue.next() with repeat-all eventually cycling back
+      // to a track that always fails attestation/SABR for this
+      // account/IP), or a DIFFERENT videoId every time (a systemic
+      // session/token/network problem, not a per-video one)?
+      console.error(
+        `[player:${this.guildId}] extraction failed for ${track.videoId} ` +
+        `after ${Date.now() - buildStartedAt}ms:`, err.message
+      );
       if (this.queue.isCurrentGeneration(generation)) {
         return this._playNext({ isError: true }); // don't let one bad track wedge the queue
       }
@@ -483,11 +419,7 @@ class GuildPlayer {
     this._clearIdleTimer();
     this.audioPlayer.play(resource);
 
-    // Track change -- delete the old panel and post a fresh one at the
-    // bottom of the channel, per the repost-on-track-change policy (keeps
-    // it from drifting off-screen in an active chat channel). Skipped for
-    // a silent track (freenitro easter egg) -- no panel, no
-    // notification, nothing.
+    // Track change: repost the panel at the bottom of the channel (not edit-in-place). Skipped for silent/easter-egg tracks.
     if (this.client && !track.silent) {
       repostPanel(this.client, this.queue, { isPaused: false }).catch((err) =>
         log.error(`player:${this.guildId}`, `panel repost failed: ${err.message}`)
@@ -495,13 +427,7 @@ class GuildPlayer {
     }
   }
 
-  /**
-   * Logs streaming_data/format shape plus CDN response detail (if any) so
-   * a genuine acquisition failure (both direct AND SABR unavailable/
-   * failed) can be diagnosed from logs alone. Kept as a separate method
-   * so Phase 1's two failure branches (no SABR available / SABR itself
-   * failed) can share it without duplicating the formatting logic.
-   */
+  /** Logs streaming_data/format/CDN detail when both direct and SABR acquisition fail, so it's diagnosable from logs alone. */
   async _logStreamFailureDiagnostic(track, info, format, directErr, sabrErr = null) {
     const sd = info.streaming_data || {};
     let cdnDetail = '';
@@ -542,11 +468,9 @@ class GuildPlayer {
   }
 
   /**
-   * SABR acquisition via googlevideo's SabrStream (see sabr.js). Returns
-   * everything Phase 1 needs to route Phase 2 correctly: the node stream,
-   * the actually-selected format (may have a different itag than `format`
-   * -- see sabr.js's chooseAudioFormat()), whether it needs an FFmpeg
-   * transcode (non-Opus), and the abort hook for _abortActiveSabr().
+   * SABR acquisition via googlevideo's SabrStream. Returns the node
+   * stream, actual selected format (may differ from `format`), whether
+   * it needs an FFmpeg transcode (non-Opus), and the abort hook.
    */
   async _acquireSabr(track, info, session, format, poToken) {
     const clientInfo = getSabrClientInfo(session, track.isMusic ? 'YTMUSIC' : 'WEB');
@@ -557,18 +481,13 @@ class GuildPlayer {
       poToken,
       {
         preferredItag: format.itag,
-        // Lets sabr.js reconnect transparently on a mid-stream
-        // RELOAD_PLAYER_RESPONSE or a recoverable stream-protection
-        // failure (stale video-bound PO token, see
-        // RECOVERABLE_SABR_ERROR_MESSAGES in sabr.js) instead of
-        // surfacing as a normal stream error that ends the track early.
+        // Lets sabr.js reconnect transparently on a recoverable failure
+        // (reload, stale video-bound token) instead of ending the track.
         refetchInfo: () => (
           track.isMusic ? session.music.getInfo(track.videoId) : session.getInfo(track.videoId)
         ),
-        // Re-mints the VIDEO-bound token (distinct from the
-        // session-level visitor_data-bound one set on
-        // session.session.player.po_token in _buildResource) -- this is
-        // what actually fixes the stale-token failure mode.
+        // Re-mints the VIDEO-bound token (distinct from the session
+        // token set in _buildResource) -- fixes the stale-token case.
         refetchPoToken: () => getPoToken(track.videoId),
         onReconnectStart: () => this._pauseForReconnect(),
         onReconnectEnd: () => this._unpauseAfterReconnect(),
@@ -586,32 +505,16 @@ class GuildPlayer {
   }
 
   async _buildResource(track) {
-    // Defensive reset -- a previous track aborted mid-reconnect (skip,
-    // error, etc.) could in principle leave this set from a pause that
-    // never got its matching onReconnectEnd. A fresh track starting
-    // means whatever that pause was for is moot regardless.
+    // Defensive reset -- a previous track's abort mid-reconnect could
+    // leave this stuck true otherwise.
     this._pausedForReconnect = false;
-    // Session client_type must match the track's context — a po_token/
-    // visitor_data minted for WEB is not valid for a YTMUSIC request (or
-    // vice versa). This was the actual cause of YTM playback failing with
-    // a non-2xx: the old code bootstrapped one WEB session and passed
-    // `{ client: 'YTMUSIC' }` as a per-call override on top of it, which
-    // reuses the wrong token context. See innertube.js for the fix.
+    // Session client_type must match the track (WEB vs YTMUSIC) -- a
+    // token minted for one isn't valid for the other. See innertube.js.
     const session = await getSession({ clientType: track.isMusic ? 'YTMUSIC' : 'WEB' });
-    // Correct client_type on the session isn't enough by itself — the
-    // *method* matters too. session.getInfo() always builds a VideoInfo
-    // via `.as(TwoColumnWatchNextResults)` regardless of session
-    // client_type (confirmed against node_modules/youtubei.js/dist/src/
-    // parser/youtube/VideoInfo.js — the cast target is hardcoded, not
-    // client-aware), and a YTMUSIC watch response comes back shaped as
-    // SingleColumnMusicWatchNextResults instead, so that cast throws:
-    // "Cannot cast SingleColumnMusicWatchNextResults to one of
-    // TwoColumnWatchNextResults". session.music.getInfo() returns
-    // TrackInfo, built for that shape, and internally still forces
-    // client: 'YTMUSIC' on its own HTTP calls while reusing the session's
-    // po_token — which is exactly why the session still needs to be
-    // YTMUSIC-bootstrapped above, even though this call doesn't take a
-    // client option itself.
+    // The *method* matters too, not just client_type: session.getInfo()
+    // always casts to a plain-YouTube shape and throws on a YTM response.
+    // session.music.getInfo() is the one that handles YTM's shape and
+    // still uses the session's YTMUSIC-bootstrapped token internally.
     //
     // NOTE: youtubei.js commonly logs a "[YOUTUBEJS][Parser]: ParsingError:
     // Type mismatch..." warning here for videos with newer UI panels
@@ -625,13 +528,8 @@ class GuildPlayer {
       ? await session.music.getInfo(track.videoId)
       : await session.getInfo(track.videoId);
 
-    // NOTE: info.chooseFormat() (youtubei.js's FormatUtils.chooseFormat)
-    // throws InnertubeError('No matching formats found') itself when there
-    // are no candidates -- confirmed against installed source, it never
-    // returns null/undefined. That throw is still caught by the try/catch
-    // around _buildResource() in _playNext(), so no separate null check is
-    // needed here; kept as a try/wrap only so the error message identifies
-    // which track failed.
+    // chooseFormat() throws (never returns null) when there's no match --
+    // wrapped only to identify which track failed.
     let format;
     try {
       format = info.chooseFormat({ type: 'audio', format: 'webm', quality: 'best' });
@@ -639,39 +537,28 @@ class GuildPlayer {
       throw new Error(`No suitable audio-only webm/opus format found for ${track.videoId}: ${err.message}`);
     }
 
-    // GVS (the actual CDN media fetch) needs a PO token bound to the VIDEO
-    // ID, not the session/visitor_data-bound one used for API calls like
-    // getInfo/search — confirmed against yt-dlp's PO Token Guide ("Most PO
-    // Tokens (such as for web GVS/Player) are bound to the video ID, so a
-    // new token is required for each video"). Without this, decipher()
-    // still runs successfully and produces a URL, but the CDN itself
-    // rejects the fetch with 403 — which is exactly the failure this was
-    // built to fix (see SABR-DIAGNOSTIC output for XDjB9E3YtUE).
+    // GVS (the CDN media fetch) needs a PO token bound to the VIDEO ID,
+    // not the session/visitor_data one used for getInfo/search. Without
+    // it the CDN rejects the fetch with 403.
     //
-    // youtubei.js's Player.decipher() has no per-call token override — it
-    // reads whatever's currently on session.player.po_token and stamps it
-    // onto the URL verbatim (confirmed in node_modules/youtubei.js/dist/
-    // src/core/Player.js). So the token has to be set there directly,
-    // right before the call that consumes it.
+    // decipher() has no per-call token override -- it reads whatever's
+    // currently on session.player.po_token, so it must be set here first.
+    // (`session.session.player`, not `session.player` -- the Innertube
+    // wrapper only exposes the real Session via the `.session` getter.)
     //
-    // CONCURRENCY CAVEAT: session (and therefore session.player) is a
-    // single object cached and shared globally per client_type across ALL
-    // guilds (see innertube.js). Mutating session.player.po_token here is
-    // NOT safe if two guilds are extracting simultaneously — guild A's
-    // video-bound token could race into guild B's concurrent download.
-    // Acceptable for this deployment (single-guild use), but if this ever
-    // needs to support concurrent multi-guild playback, this needs a
-    // per-download Player instance or a request-scoped token override
-    // instead of mutating shared session state.
-    // youtubei.js's `session` variable here is the top-level `Innertube`
-    // wrapper class. Its real Session object (which holds `.player`) is a
-    // PRIVATE `#session` field internally — only reachable via the public
-    // `.session` getter (`get session() { return this.#session; }`,
-    // confirmed directly in node_modules/youtubei.js/dist/src/
-    // Innertube.js). So this is `session.session.player`, not
-    // `session.player` — the latter is undefined on the wrapper and would
-    // throw.
+    // CONCURRENCY CAVEAT: session.player is shared globally per
+    // client_type across all guilds. Mutating po_token here isn't safe
+    // under concurrent multi-guild playback (not a concern for this
+    // single-guild deployment) -- would need a per-download token
+    // override instead of mutating shared state.
     const poToken = await getPoToken(track.videoId);
+    // Diagnostic: confirms the session and video-bound tokens are
+    // actually distinct values, rather than assuming it.
+    log.debug(
+      'player',
+      `${track.videoId}: session po_token before overwrite: len=${session.session.player.po_token?.length ?? 0}, ` +
+      `video-bound po_token: len=${poToken?.length ?? 0}, identical=${session.session.player.po_token === poToken}`
+    );
     session.session.player.po_token = poToken;
 
     // PHASE 1: acquire a raw webm/opus byte stream, direct-URL first,
@@ -689,49 +576,29 @@ class GuildPlayer {
     let nodeStream;
     let usedSabr = false;
     // The format ACTUALLY being streamed, used below for prebuffer sizing.
-    // Deliberately NOT always `format` -- when SABR fallback kicks in,
-    // sabr.js's chooseAudioFormat() only reuses `format.itag` if that
-    // exact itag happens to be present among the SABR-eligible formats;
-    // SABR-only responses frequently don't include it at all (that's
-    // often *why* SABR fallback triggered in the first place), so it
-    // silently picks a different itag with a different bitrate instead.
-    // Sizing the prebuffer from the wrong (direct-download) format's
-    // bitrate when that mismatch happens under/over-sizes the buffer for
-    // the bitrate actually arriving -- this was the root cause of the
-    // stutter/speedup/cutoff reports specific to SABR playback: once the
-    // network buffer under-fills relative to real playback rate,
-    // @discordjs/voice's own catch-up scheduling (it targets a fixed
-    // 20ms cadence and fires back-to-back with minimal delay once behind
-    // -- confirmed in node_modules/@discordjs/voice/dist/index.js's
-    // audioCycleStep) makes the recovery audibly sound like a speedup,
-    // not just a stall.
+    // NOT always `format` -- SABR fallback may pick a different itag/
+    // bitrate than the direct-download pick (chooseAudioFormat() falls
+    // back when the preferred itag isn't SABR-eligible). Sizing the
+    // prebuffer off the wrong bitrate here was the root cause of the
+    // SABR-specific stutter/speedup reports.
     let streamFormat = format;
-    // Only meaningful when usedSabr is true: whether the SABR-selected
-    // format is Opus-coded, and therefore whether Phase 2 needs to route
-    // through buildOpusPipeline() (plain WebM demux) or
-    // buildTranscodedOpusPipeline() (FFmpeg decode + Opus re-encode --
-    // see demuxPipeline.js and sabr.js's chooseAudioFormat()). The
-    // direct-download path above always requests `format: 'webm'`
-    // explicitly, so it never needs this check.
+    // Only meaningful when usedSabr: whether the SABR format is Opus, and
+    // so whether Phase 2 needs a plain demux or an FFmpeg transcode.
     let sabrNeedsTranscode = false;
 
-    // Applies the result of a successful _acquireSabr() call to the
-    // Phase-1 locals above. Shared by both routing branches below.
+    // Applies a successful _acquireSabr() result to the locals above.
     const applySabr = (sabrResult) => {
       nodeStream = sabrResult.nodeStream;
       usedSabr = true;
       streamFormat = sabrResult.format;
       sabrNeedsTranscode = sabrResult.needsTranscode;
-      // Set immediately, not after Phase 2 succeeds -- a failure anywhere
-      // below (prebuffer, demux/transcode) still needs this track's
-      // fetch loop stopped, and _playNext()'s next call handles that
-      // unconditionally via _abortActiveSabr().
+      // Set immediately (not after Phase 2 succeeds) -- any later failure
+      // still needs this track's fetch loop stopped via _abortActiveSabr().
       this._activeAbort = sabrResult.abort;
     };
 
     if (track.isMusic) {
-      // YTM (WEB_REMIX client): direct-URL confirmed working end-to-end
-      // in production. Tried first; SABR is only a safety-net fallback.
+      // YTM: direct-URL confirmed reliable, tried first; SABR is a safety-net fallback.
       try {
         nodeStream = await this._acquireDirect(track, info, format);
       } catch (directErr) {
@@ -752,16 +619,9 @@ class GuildPlayer {
         }
       }
     } else {
-      // Plain YouTube (WEB client): increasingly forced onto SABR-only
-      // delivery -- info.download() throws "No valid URL to decipher"
-      // synchronously, before any network fetch, for these (the chosen
-      // format has no url/signature_cipher/cipher at all; confirmed via
-      // SABR-DIAGNOSTIC logging and matches an independently confirmed
-      // yt-dlp bug). Trying direct-URL first for these is a
-      // guaranteed-wasted round trip, not a real fallback path -- go
-      // straight to SABR. Direct-URL is only attempted as a last resort,
-      // for the case where this particular video has no SABR delivery
-      // available either.
+      // Plain YouTube: increasingly SABR-only -- direct-URL throws
+      // synchronously for these, so go straight to SABR. Direct-URL is
+      // only a last-resort fallback if no SABR delivery exists either.
       const sd = info.streaming_data || {};
       if (sd.server_abr_streaming_url) {
         try {
@@ -796,40 +656,24 @@ class GuildPlayer {
     // genuine playback failure, not a reason to fall back again.
     let stage1 = null;
 
-    // Permanent, not torn down after prebuffering finishes. `.pipe()`
-    // does NOT forward 'error' events from source to destination -- a
-    // well-known Node stream gotcha. The prebuffer-phase promise below
-    // only listens with `.once()`, removed as soon as it settles, so
-    // WITHOUT this, any nodeStream error occurring after the initial
-    // buffering window (a mid-track network drop, a stall, or SABR's own
-    // "attestation required" throw -- see isAttestationRequired() below,
-    // all of which happen well into playback in practice, not up front)
-    // would be a fully unhandled 'error' event, which crashes the entire
-    // bot process, not just this one track. Forwarding into stage1 here
-    // routes it through the exact same handling the demux/transcode
-    // pipeline below already has wired for stage1 errors.
+    // Permanent -- .pipe() doesn't forward 'error' events, and the
+    // prebuffer promise below only listens with .once() until it settles.
+    // Without this, a late nodeStream error (mid-track drop, stall,
+    // attestation failure) would be unhandled and crash the whole process.
     nodeStream.on('error', (err) => {
       if (stage1 && !stage1.destroyed) stage1.destroy(err);
     });
 
-    // [network] chunk-arrival gap tracking -- diagnostic only, gated
-    // below by log.isVerbose(). Separate from stage1/stage2's own
-    // buffer-level monitors: this watches the SOURCE side (raw chunks
-    // arriving from the CDN fetch, before any of our own buffering),
-    // to tell apart "the fetch itself paused" from "the fetch kept
-    // delivering fine but something downstream didn't drain fast
-    // enough". Without this, a stage1/stage2 starvation reading alone
-    // can't say which end of the pipe caused it.
+    // [network] chunk-arrival gap tracking, MB_VERBOSE only. Watches the
+    // raw CDN fetch (source side), separate from stage1/stage2's own
+    // buffer monitors, to tell "fetch paused" from "fetch fine, drain slow".
     let lastChunkAt = null;
     if (log.isVerbose()) {
       nodeStream.on('data', (chunk) => {
         const now = Date.now();
         if (lastChunkAt !== null) {
           const gapMs = now - lastChunkAt;
-          // 100ms threshold: comfortably above normal TCP/segment-fetch
-          // jitter, well below the ~400-500ms glitch cadence being
-          // chased -- a real gap this size is a plausible contributor,
-          // normal inter-chunk timing is not.
+          // 100ms: above normal jitter, below the glitch cadence being chased.
           if (gapMs >= 100) {
             log.debug(
               `player:${this.guildId}`,
@@ -843,8 +687,8 @@ class GuildPlayer {
     }
 
     let result;
-    let prebufferTargetBytes; // hoisted: also read by the buffer-state debug log below
-    let bitrateBps; // hoisted: also read by the buffer-state debug log below (bytes -> seconds)
+    let prebufferTargetBytes; // hoisted -- also read by the debug log below
+    let bitrateBps; // hoisted -- also read by the debug log below
     try {
       bitrateBps = streamFormat.bitrate > 0 ? streamFormat.bitrate : config.assumedBitrateBps;
       prebufferTargetBytes = Math.max(
@@ -857,8 +701,7 @@ class GuildPlayer {
       );
 
       // Stage 1: network buffer. Withholds output until prebufferTargetBytes
-      // has accumulated (the "wait N seconds before playing" gate), then
-      // keeps buffering up to networkHighWaterMark on an ongoing basis to
+      // accumulates, then keeps buffering up to networkHighWaterMark to
       // smooth CDN jitter for the rest of the track.
       stage1 = new PrebufferTransform({
         targetBytes: prebufferTargetBytes,
@@ -876,13 +719,9 @@ class GuildPlayer {
         };
         const timer = setTimeout(() => {
           cleanup();
-          // Without this, stage1 keeps withholding everything until
-          // targetBytes is eventually reached regardless of the timeout
-          // -- "starting anyway" below would be a lie, since nothing
-          // downstream actually receives data until the full prebuffer
-          // target arrives (or the source ends). forceRelease() hands
-          // over whatever's buffered so far right now, matching what the
-          // log message actually claims is happening.
+          // Must actually release buffered data here, or "starting
+          // anyway" below is a lie -- stage1 would keep withholding until
+          // targetBytes is reached regardless of this timeout.
           stage1.forceRelease();
           resolve({ timedOut: true });
         }, config.prebufferTimeoutMs);
@@ -930,53 +769,19 @@ class GuildPlayer {
       },
     });
 
-    // Buffer state: periodic snapshot (not per-frame -- that'd be 50/sec)
-    // of what's currently sitting in each stage's internal buffer,
-    // reported as seconds of audio held rather than raw bytes/frame
-    // counts -- "how much has it buffered" is what this is actually
-    // for, and bytes/frames don't answer that at a glance. Tagged
-    // [stage1]/[stage2] (in the message text, not the log scope) so the
-    // two are easy to tell apart and grep for independently -- they're
-    // different stages with different failure implications (stage1
-    // starving points at the network/CDN fetch, stage2 starving points
-    // at demux throughput or the object-buffer sizing feeding
-    // @discordjs/voice directly).
-    // stage1 (PrebufferTransform) is byte-mode: readableLength is bytes,
-    // converted via the format's bitrate. stage2 (opusStream,
-    // object-mode PassThrough inside buildOpusPipeline/
-    // buildTranscodedOpusPipeline) counts frames, not bytes, in object
-    // mode -- confirmed against Node's stream docs -- converted via the
-    // fixed 20ms Opus frame duration (OPUS_FRAME_MS).
+    // Buffer state: 5s periodic snapshot of each stage's buffer, reported
+    // as seconds/ms of audio held. stage1 is byte-mode (converted via
+    // bitrate); stage2 is object-mode frames (converted via OPUS_FRAME_MS).
     //
-    // A 5-second snapshot cannot see a glitch shorter than 5 seconds --
-    // it only proves the buffer happened to be non-empty at each sample
-    // point, not that it stayed that way in between. Reported glitches
-    // this coarse a sample can't rule out: short, repeating dips where
-    // stage2 empties out between samples and refills before the next one
-    // fires. The starve monitor below exists specifically to catch that:
-    // it polls stage2.readableLength on the SAME cadence @discordjs/voice
-    // itself reads from it (OPUS_FRAME_MS, confirmed against installed
-    // source -- AudioPlayer's audioCycleStep runs every FRAME_LENGTH =
-    // 20ms and calls state.resource.read() once per tick, injecting a
-    // silence frame and counting a "missed frame" whenever that read
-    // comes back empty -- 5 consecutive misses stops the track outright).
-    // A run of consecutive empty polls here is the same condition that
-    // produces those silence-frame substitutions -- audible as exactly
-    // the kind of short, regular glitch being reported. Logged
-    // immediately per run (with its actual duration), not deferred to
-    // the next periodic summary, since the run's start/length is the
-    // whole point of this and averaging it into a 5-second window would
-    // destroy that information.
+    // A 5s snapshot can't see a shorter glitch -- the starve monitor below
+    // covers that gap, polling stage2 on the same 20ms cadence
+    // @discordjs/voice itself reads from it (5 consecutive empty reads
+    // there stops the track). Logged immediately per run, not batched
+    // into the 5s summary, so the run's actual duration isn't lost.
     if (log.isVerbose()) {
       const bytesPerSec = bitrateBps / 8;
-      // Infinity, not the instantaneous value at creation -- stage1 and
-      // opusStream are both freshly created and empty at this exact
-      // point, so seeding from .readableLength here would start every
-      // window at 0 by construction (nothing buffered yet has nothing to
-      // do with real starvation) and, since Math.min can only shrink,
-      // that false 0 would then survive as the reported minimum for the
-      // entire first window regardless of what actually happened during
-      // it.
+      // Infinity, not 0 -- both streams start empty, so seeding from the
+      // current value would report a false starvation minimum for window 1.
       let minStage1Since = Infinity;
       let minStage2Since = Infinity;
       const bufferLogInterval = setInterval(() => {
