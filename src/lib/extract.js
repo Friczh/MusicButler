@@ -113,25 +113,17 @@ async function resolveQuery(session, query) {
     };
   }
 
-  // YTM search (not plain-YouTube search) -- matches the rest of this
-  // codebase's YTM-first bias and avoids a second, differently-shaped
-  // session/client_type just for search. Unfiltered so both the Songs and
-  // Videos shelves come back in one call; Songs preferred (this is a music
-  // bot), Videos as fallback for tracks YTM doesn't catalog as a "song".
-  const musicResults = await session.music.search(query);
-  const songs = musicResults.songs?.contents ?? [];
-  const videos = musicResults.videos?.contents ?? [];
-  const firstPlayable = [...songs, ...videos].find(
-    (item) => (item.item_type === 'song' || item.item_type === 'video') && item.id
-  );
-  if (!firstPlayable) {
+  const results = await session.search(query, { type: 'video' });
+  const firstVideo = results.results.firstOfType(YTNodes.Video);
+  if (!firstVideo) {
     throw new Error(`No results found for "${query}"`);
   }
   return {
-    videoId: firstPlayable.id,
-    isMusic: true,
-    title: firstPlayable.title ?? firstPlayable.id,
-    duration: firstPlayable.duration?.seconds ?? 0,
+    videoId: firstVideo.video_id,
+    isMusic: false,
+    title: firstVideo.title?.text ?? firstVideo.video_id,
+    // Video node's duration is { text, seconds }, unlike the plain int above.
+    duration: firstVideo.duration?.seconds ?? 0,
   };
 }
 

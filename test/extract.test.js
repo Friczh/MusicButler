@@ -114,37 +114,31 @@ test('resolveQuery: falls back to videoId when title is missing', async () => {
   assert.equal(result.title, 'noTitle1');
 });
 
-test('resolveQuery: a free-text query searches YTM and prefers the first song result', async () => {
-  const fakeSong = { item_type: 'song', id: 'searched1', title: 'Searched Song', duration: { seconds: 0 } };
+test('resolveQuery: a free-text query searches and takes the first video result', async () => {
+  const { YTNodes } = require('youtubei.js');
+  const fakeVideo = Object.create(YTNodes.Video.prototype);
+  fakeVideo.video_id = 'searched1';
+  fakeVideo.title = { text: 'Searched Song' };
+  // duration is a getter on Video.prototype that reads these fields --
+  // stub them so it doesn't throw on this bare fake (confirmed against
+  // installed source: Video.js).
+  fakeVideo.length_text = undefined;
+  fakeVideo.thumbnail_overlays = { firstOfType: () => undefined };
 
   const session = {
-    music: {
-      search: async (query) => {
-        assert.equal(query, 'some great song');
-        return { songs: { contents: [fakeSong] }, videos: { contents: [] } };
-      },
+    search: async (query, filters) => {
+      assert.equal(query, 'some great song');
+      assert.deepEqual(filters, { type: 'video' });
+      return { results: { firstOfType: () => fakeVideo } };
     },
   };
 
   const result = await resolveQuery(session, 'some great song');
-  assert.deepEqual(result, { videoId: 'searched1', isMusic: true, title: 'Searched Song', duration: 0 });
+  assert.deepEqual(result, { videoId: 'searched1', isMusic: false, title: 'Searched Song', duration: 0 });
 });
 
-test('resolveQuery: falls back to the Videos shelf when Songs has no playable result', async () => {
-  const fakeVideo = { item_type: 'video', id: 'searched2', title: 'Searched Video', duration: { seconds: 42 } };
-
-  const session = {
-    music: {
-      search: async () => ({ songs: { contents: [] }, videos: { contents: [fakeVideo] } }),
-    },
-  };
-
-  const result = await resolveQuery(session, 'some great video');
-  assert.deepEqual(result, { videoId: 'searched2', isMusic: true, title: 'Searched Video', duration: 42 });
-});
-
-test('resolveQuery: throws when a YTM search finds nothing playable', async () => {
-  const session = { music: { search: async () => ({ songs: undefined, videos: undefined }) } };
+test('resolveQuery: throws when a search finds nothing', async () => {
+  const session = { search: async () => ({ results: { firstOfType: () => undefined } }) };
   await assert.rejects(() => resolveQuery(session, 'no results for this'), /No results found/);
 });
 
