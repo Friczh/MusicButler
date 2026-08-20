@@ -1,19 +1,27 @@
 'use strict';
 
 // Client for jim60105/bgutil-ytdlp-pot-provider-rs running in HTTP server
-// mode (`bgutil-pot server`). Real contract, confirmed against the project's
-// README (v0.8.x):
-//   GET  /ping                                    -> 200 if ready
-//   POST /get_pot { "content_binding": "<...>" }   -> { "po_token": "<...>" }
-//   POST /invalidate_it { "content_binding": "<...>" } -> 200
+// mode (`bgutil-pot server`). Real contract, confirmed against the actual
+// Rust source (session/manager.rs, server/handlers.rs, types/request.rs):
+//   GET  /ping                                                  -> 200 if ready
+//   POST /get_pot { content_binding, bypass_cache? }             -> { po_token }
 // Do NOT use /token or a video_id/data_sync_id body — those belonged to the
 // older TypeScript implementation and are not this binary's contract.
 //
-// /get_pot is fronted by SessionDataCaches (content_binding -> po_token),
-// checked before any real BotGuard solve -- calling /get_pot again after a
-// rejected token just returns the same cached value. /invalidate_it clears
-// that cache entry only (not the whole server), forcing the next /get_pot
-// for the same content_binding to do a genuine fresh solve.
+// generate_pot_token() checks a content_binding -> po_token cache
+// (session_data_caches) FIRST, before any BotGuard solve, UNLESS
+// request.bypass_cache is true -- in which case it skips the cache check
+// unconditionally and always does a fresh solve. This is the only
+// per-content_binding way to force a fresh token.
+//
+// /invalidate_it looked like the right tool but isn't: it only expires
+// entries in a DIFFERENT cache (minter_cache, the BotGuard token minter),
+// not session_data_caches -- so it has no effect on the "still fresh,
+// returning cached token" path. The only thing that clears
+// session_data_caches is /invalidate_caches, which nukes ALL content
+// bindings server-wide, not just this one -- too blunt for a single
+// video's stuck attestation. bypass_cache on /get_pot is scoped correctly
+// and is the mechanism this file uses.
 
 const { log } = require('./log');
 
@@ -63,9 +71,13 @@ async function waitForReady(baseUrl = DEFAULT_BASE_URL, { retries = 20, delayMs 
  * @param {string} contentBinding - session visitor_data (NOT a video id) for
  *   the session-bound token youtubei.js's `po_token` option expects.
  * @param {string} baseUrl
+ * @param {{ bypassCache?: boolean }} [opts] - bypassCache forces a fresh
+ *   BotGuard solve instead of returning a cached (possibly already-rejected)
+ *   token for this content_binding. Use for refresh/retry calls; leave
+ *   false for the normal first mint, where a cache hit is desirable.
  * @returns {Promise<string>} po_token
  */
-async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
+async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL, { bypassCache = false } = {}) {
   if (!contentBinding) {
     throw new Error('getPoToken: contentBinding is required');
   }
@@ -74,7 +86,7 @@ async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content_binding: contentBinding }),
+      body: JSON.stringify({ content_binding: contentBinding, bypass_cache: bypassCache }),
     },
     REQUEST_TIMEOUT_MS
   );
@@ -91,46 +103,10 @@ async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
   }
   log.debug(
     'potProvider',
-    `minted ${tokenFingerprint(token)} for content_binding tail=…${contentBinding.slice(-6)}`
+    `minted ${tokenFingerprint(token)} for content_binding tail=…${contentBinding.slice(-6)}` +
+    `${bypassCache ? ' (cache bypassed)' : ''}`
   );
   return token;
 }
 
-/**
- * Clears the cached po_token for `contentBinding` in bgutil-rust's
- * SessionDataCaches, so the next getPoToken() call for the same binding
- * does a real BotGuard solve instead of returning the same rejected token.
- * Best-effort: a failure here shouldn't block the caller's subsequent
- * getPoToken() retry, so this resolves false on error rather than throwing.
- * @param {string} contentBinding
- * @param {string} baseUrl
- * @returns {Promise<boolean>} true if the invalidation call succeeded
- */
-async function invalidateToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
-  if (!contentBinding) {
-    throw new Error('invalidateToken: contentBinding is required');
-  }
-  try {
-    const res = await fetchWithTimeout(
-      `${baseUrl}/invalidate_it`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content_binding: contentBinding }),
-      },
-      REQUEST_TIMEOUT_MS
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      log.error('potProvider', `/invalidate_it failed: HTTP ${res.status} ${text}`);
-      return false;
-    }
-    log.debug('potProvider', `invalidated cached token for content_binding tail=…${contentBinding.slice(-6)}`);
-    return true;
-  } catch (err) {
-    log.error('potProvider', `/invalidate_it request failed: ${err.message}`);
-    return false;
-  }
-}
-
-module.exports = { waitForReady, getPoToken, invalidateToken, DEFAULT_BASE_URL };
+module.exports = { waitForReady, getPoToken, DEFAULT_BASE_URL };

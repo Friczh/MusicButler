@@ -11,7 +11,7 @@ const {
   entersState,
 } = require('@discordjs/voice');
 const { getSession, getSabrClientInfo } = require('./innertube');
-const { getPoToken, invalidateToken } = require('./potProvider');
+const { getPoToken } = require('./potProvider');
 const { buildSabrAudioStream } = require('./sabr');
 const { PrebufferTransform } = require('./prebuffer');
 const { buildOpusPipeline, buildTranscodedOpusPipeline } = require('./demuxPipeline');
@@ -486,13 +486,12 @@ class GuildPlayer {
         refetchInfo: () => (
           track.isMusic ? session.music.getInfo(track.videoId) : session.getInfo(track.videoId)
         ),
-        // Re-mints the VIDEO-bound token (distinct from the session
-        // token set in _buildResource) -- fixes the stale-token case.
-        refetchPoToken: () => getPoToken(track.videoId),
-        // Clears bgutil-rust's cached token for this video ID before the
-        // refetch above, when the reconnect was itself attestation-caused --
-        // otherwise refetchPoToken() just returns the same rejected token.
-        invalidatePoToken: () => invalidateToken(track.videoId),
+        // Re-mints the VIDEO-bound token (distinct from the session token
+        // set in _buildResource) -- fixes the stale-token case. bypassCache
+        // forces a genuine fresh BotGuard solve; without it, bgutil-rust
+        // just returns the same already-rejected cached token for this
+        // content_binding and the attestation-pending loop never breaks.
+        refetchPoToken: () => getPoToken(track.videoId, undefined, { bypassCache: true }),
         onReconnectStart: () => this._pauseForReconnect(),
         onReconnectEnd: () => this._unpauseAfterReconnect(),
       }
