@@ -8,9 +8,17 @@
 // Do NOT use /token or a video_id/data_sync_id body — those belonged to the
 // older TypeScript implementation and are not this binary's contract.
 
+const { log } = require('./log');
+
 const DEFAULT_BASE_URL = process.env.POT_PROVIDER_URL || 'http://127.0.0.1:4416';
 const PING_TIMEOUT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 15000;
+
+// Never log a full PO token, only enough to correlate mints in a log stream.
+function tokenFingerprint(token) {
+  if (!token) return '<none>';
+  return `len=${token.length} tail=…${token.slice(-6)}`;
+}
 
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
@@ -74,6 +82,16 @@ async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
   if (!token || typeof token !== 'string' || token.length === 0) {
     throw new Error(`POT provider /get_pot response missing po_token/poToken: ${JSON.stringify(data)}`);
   }
+  // Same snake/camel inconsistency as po_token/poToken. Surfacing these so
+  // a stuck-attempt investigation can see, per mint: fresh solve vs snapshot
+  // reuse, and how close to expiry the token already was.
+  const fromSnapshot = data.from_snapshot ?? data.fromSnapshot ?? '<unset>';
+  const validUntil = data.valid_until ?? data.validUntil ?? '<unset>';
+  log.debug(
+    'potProvider',
+    `minted ${tokenFingerprint(token)} for content_binding tail=…${contentBinding.slice(-6)} -- ` +
+    `from_snapshot=${fromSnapshot}, valid_until=${validUntil}`
+  );
   return token;
 }
 

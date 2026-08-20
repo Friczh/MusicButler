@@ -124,7 +124,7 @@ async function deriveSabrParams(info, session) {
  * session mid-stream via RELOAD_PLAYER_RESPONSE.
  * @private
  */
-async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs) {
+async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs, refetchPoToken, onPoTokenRefreshed) {
   const attemptStartedAt = Date.now();
   log.debug(
     'sabr',
@@ -142,6 +142,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   // Must capture state synchronously inside the event listener -- the
   // library resets it right after emitting, before our catch block runs.
   let reloadState = null;
+  let tokenRefreshInFlight = false;
   stream.on('reloadPlayerResponse', () => {
     log.debug('sabr', `reloadPlayerResponse event received (${Date.now() - attemptStartedAt}ms into this attempt)`);
     captureReloadState();
@@ -163,6 +164,27 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
         `attestation status ${label} on this attempt -- poToken ${tokenFingerprint(poToken)}`
       );
       captureReloadState();
+      // Try setPoToken() on the live stream before SABR_MAX_RETRIES exhausts
+      // and the outer reconnect loop tears the whole attempt down. Cheap:
+      // reuses the existing connection instead of a full reconnect. Guarded
+      // to fire once per attempt -- repeated status events while one
+      // refresh is already in flight shouldn't stack overlapping mints.
+      if (refetchPoToken && !tokenRefreshInFlight) {
+        tokenRefreshInFlight = true;
+        refetchPoToken()
+          .then((freshToken) => {
+            log.debug(
+              'sabr',
+              `attestation ${label} -- re-minted PO token ${tokenFingerprint(poToken)} -> ` +
+              `${tokenFingerprint(freshToken)}, calling setPoToken() before retries exhaust`
+            );
+            stream.setPoToken(freshToken);
+            onPoTokenRefreshed?.(freshToken);
+          })
+          .catch((err) => {
+            log.error('sabr', `attestation ${label} -- setPoToken() refresh attempt failed: ${err.message}`);
+          });
+      }
     }
   });
   function captureReloadState() {
@@ -212,8 +234,18 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
 async function buildSabrAudioStream(info, session, clientInfo, poToken, { preferredItag, refetchInfo, refetchPoToken, stallDetectionMs, onReconnectStart, onReconnectEnd } = {}) {
   const trackStartedAt = Date.now();
   const params = await deriveSabrParams(info, session);
-  let attempt = await startSabrAttempt(params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs);
   let currentPoToken = poToken;
+  // True once a proactive setPoToken() refresh has landed for the attempt
+  // currently in flight -- lets the outer reconnect below skip a redundant
+  // refetchPoToken() call if the attempt already got a fresh one this way.
+  let poTokenRefreshedThisAttempt = false;
+  const onPoTokenRefreshed = (freshToken) => {
+    currentPoToken = freshToken;
+    poTokenRefreshedThisAttempt = true;
+  };
+  let attempt = await startSabrAttempt(
+    params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs, refetchPoToken, onPoTokenRefreshed
+  );
   // Lets reconnect logging show the gap between loop iterations.
   let lastReconnectAt = trackStartedAt;
 
@@ -300,14 +332,23 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
           awaitingFirstChunkAfterReconnect = true;
           try {
             if (refetchPoToken) {
-              const previousToken = currentPoToken;
-              currentPoToken = await refetchPoToken();
-              log.debug(
-                'sabr',
-                `re-minted PO token: ${tokenFingerprint(previousToken)} -> ${tokenFingerprint(currentPoToken)}` +
-                `${previousToken === currentPoToken ? ' (WARNING: identical to previous token -- refresh may not be working)' : ''}`
-              );
+              if (poTokenRefreshedThisAttempt) {
+                log.debug(
+                  'sabr',
+                  `reconnecting -- reusing ${tokenFingerprint(currentPoToken)} already refreshed via ` +
+                  `setPoToken() mid-attempt, skipping redundant refetchPoToken()`
+                );
+              } else {
+                const previousToken = currentPoToken;
+                currentPoToken = await refetchPoToken();
+                log.debug(
+                  'sabr',
+                  `re-minted PO token: ${tokenFingerprint(previousToken)} -> ${tokenFingerprint(currentPoToken)}` +
+                  `${previousToken === currentPoToken ? ' (WARNING: identical to previous token -- refresh may not be working)' : ''}`
+                );
+              }
             }
+            poTokenRefreshedThisAttempt = false;
             const freshInfo = await refetchInfo();
             const freshParams = await deriveSabrParams(freshInfo, session);
             attempt = await startSabrAttempt(
@@ -316,7 +357,9 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
               currentPoToken,
               audioFormat.itag,
               reloadState || undefined,
-              stallDetectionMs
+              stallDetectionMs,
+              refetchPoToken,
+              onPoTokenRefreshed
             );
             currentReader = attempt.audioStream.getReader();
             continue; // retry the read against the newly reconnected stream
