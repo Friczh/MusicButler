@@ -73,12 +73,21 @@ async function bootstrapVisitorData(clientType) {
   if (!visitorData) {
     throw new Error(`bootstrapVisitorData(${clientType}): failed to obtain visitor_data from bootstrap session`);
   }
-  return visitorData;
+  // Returned alongside visitorData (not re-derived later) so buildSession
+  // can pass it straight to potProvider.getPoToken without a second
+  // bootstrap Innertube.create() call just to get a context object.
+  return { visitorData, context: bootstrap.session.context };
 }
 
 async function buildSession(clientType) {
-  const visitorData = await bootstrapVisitorData(clientType);
-  const poToken = await getPoToken(visitorData);
+  const { visitorData, context } = await bootstrapVisitorData(clientType);
+  // BotGuard's VM/interpreter isn't client_type-specific -- only the
+  // content_binding (visitor_data here) differs -- so this reuses one
+  // shared, process-wide BotGuard instance (see potProvider.js) instead
+  // of building a separate jsdom+VM per client_type. context is only
+  // used by potProvider's InnerTube att/get fallback path, if the
+  // watch-page embed didn't include an inline interpreter URL.
+  const poToken = await getPoToken(visitorData, context);
   const session = await Innertube.create({
     client_type: CLIENT_TYPE_FOR[clientType],
     cookie: getCookieHeader(),

@@ -44,7 +44,7 @@ Requirements: Docker + Docker Compose.
    docker compose build --no-cache
    docker compose up -d
    ```
-   Use `--no-cache` on rebuilds — `ffmpeg-static`/`bgutil-pot` aren't pinned to a lockfile hash, so a stale layer cache can keep an old binary around.
+   Use `--no-cache` on rebuilds — `ffmpeg-static` isn't pinned to a lockfile hash, so a stale layer cache can keep an old binary around.
 ## Config
 
 Set in `.env` (see `.env.example`).

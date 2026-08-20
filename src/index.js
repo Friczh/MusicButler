@@ -4,7 +4,7 @@ const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { commands } = require('./lib/commandDefs');
 const { QueueManager } = require('./lib/queueManager');
 const { PlayerManager } = require('./lib/player');
-const { waitForReady: waitForPotProvider } = require('./lib/potProvider');
+const { getSession } = require('./lib/innertube');
 const { startHealthServer } = require('./lib/health');
 const { handlePanelInteraction } = require('./lib/panelInteractions');
 const { initIcons } = require('./lib/icons');
@@ -63,12 +63,16 @@ client.once('ready', async () => {
   log.info('discord', `Connected to Discord with identify ${client.user.tag}`);
 
   try {
-    await waitForPotProvider();
-    log.info('discord', 'POT provider is ready.');
+    // Pre-warms the WEB session AND, as a side effect (buildSession ->
+    // getPoToken), the shared in-process BotGuard instance (jsdom + VM,
+    // see potProvider.js) -- so the first real play command doesn't pay
+    // that ~120-160MB / few-second build cost mid-track.
+    await getSession({ clientType: 'WEB' });
+    log.info('discord', 'InnerTube session and BotGuard attestation are ready.');
   } catch (err) {
-    log.error('discord', 'POT provider health check failed:', err.message);
+    log.error('discord', 'Startup InnerTube/BotGuard warm-up failed:', err.message);
     // Keep running — playback commands will surface the real error per-track
-    // rather than crash-looping the whole bot over a transient sidecar hiccup.
+    // rather than crash-looping the whole bot over a transient startup hiccup.
   }
 
   try {

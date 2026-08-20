@@ -488,10 +488,12 @@ class GuildPlayer {
         ),
         // Re-mints the VIDEO-bound token (distinct from the session token
         // set in _buildResource) -- fixes the stale-token case. bypassCache
-        // forces a genuine fresh BotGuard solve; without it, bgutil-rust
-        // just returns the same already-rejected cached token for this
-        // content_binding and the attestation-pending loop never breaks.
-        refetchPoToken: () => getPoToken(track.videoId, undefined, { bypassCache: true }),
+        // rebuilds the shared BotGuard instance from scratch (fresh
+        // watch-page scrape + fresh VM) instead of reusing the cached
+        // one; without it, a rejected/stale snapshot just keeps minting
+        // the same already-rejected token and the attestation-pending
+        // loop never breaks.
+        refetchPoToken: () => getPoToken(track.videoId, session.session.context, { bypassCache: true }),
         onReconnectStart: () => this._pauseForReconnect(),
         onReconnectEnd: () => this._unpauseAfterReconnect(),
       }
@@ -554,7 +556,7 @@ class GuildPlayer {
     // under concurrent multi-guild playback (not a concern for this
     // single-guild deployment) -- would need a per-download token
     // override instead of mutating shared state.
-    const poToken = await getPoToken(track.videoId);
+    const poToken = await getPoToken(track.videoId, session.session.context);
     // Diagnostic: confirms the session and video-bound tokens are
     // actually distinct values, rather than assuming it.
     log.debug(

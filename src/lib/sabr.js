@@ -73,8 +73,8 @@ function chooseAudioFormat(formats, preferredItag) {
  * @param {{ preferredItag?: number, refetchInfo?: Function, refetchPoToken?: Function, stallDetectionMs?: number, onReconnectStart?: Function, onReconnectEnd?: Function }} [opts]
  *   refetchInfo/refetchPoToken: called on a recoverable mid-stream failure
  *   to re-fetch info/token and reconnect seamlessly instead of erroring.
- *   refetchPoToken must bypass bgutil-rust's content_binding->po_token
- *   cache (potProvider.getPoToken's bypassCache option) -- without that,
+ *   refetchPoToken must bypass potProvider's cached BotGuard instance
+ *   (potProvider.getPoToken's bypassCache option) -- without that,
  *   this just returns the same already-rejected token and the
  *   attestation-pending state never actually resolves.
  * @returns {Promise<{ audioStream: ReadableStream<Uint8Array>, format: object, abort: () => void }>}
@@ -348,9 +348,9 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
                 );
               } else {
                 const previousToken = currentPoToken;
-                // refetchPoToken must bypass bgutil-rust's cache itself
-                // (see JSDoc on buildSabrAudioStream) -- nothing to bust
-                // here.
+                // refetchPoToken must bypass potProvider's cached
+                // BotGuard instance itself (see JSDoc on
+                // buildSabrAudioStream) -- nothing to bust here.
                 currentPoToken = await refetchPoToken();
                 log.debug(
                   'sabr',

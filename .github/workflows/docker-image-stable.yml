@@ -15,8 +15,8 @@ name: Build and publish Docker image (stable)
 #     use this when you want to hand your friend a specific, pinned
 #     version instead of a moving `:latest`.
 #   - workflow_dispatch: manual "Run workflow" button, for a rebuild
-#     without a new commit (e.g. after ffmpeg-static/bgutil-pot upstream
-#     releases a fix, since neither is pinned to a lockfile hash here).
+#     without a new commit (e.g. after ffmpeg-static upstream releases a
+#     fix, since it isn't pinned to a lockfile hash here).
 #     Three inputs on the manual-run form:
 #       - sha_tag: overrides the SHA tag's VALUE outright (not a prefix
 #         glued onto it) -- e.g. entering "h3id82-hotfix" publishes
@@ -121,11 +121,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Single-platform (linux/amd64) on purpose -- the Dockerfile
-          # already pins to a specific glibc floor (debian:bookworm-slim,
-          # see its own comments re: bgutil-pot's glibc >= 2.34
-          # requirement) and this is meant for one specific x86_64
-          # Debian host, not general distribution. Add
+          # Single-platform (linux/amd64) on purpose -- this is meant for
+          # one specific x86_64 Debian host, not general distribution, not
+          # a glibc-floor requirement (no prebuilt release binary in this
+          # image anymore -- PO tokens are minted in-process via
+          # bgutils-js/jsdom, see src/lib/potProvider.js). Add
           # linux/arm64 here (and switch to QEMU emulation or an
           # arm64 runner) only if that host ever changes.
           platforms: linux/amd64
