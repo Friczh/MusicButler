@@ -57,6 +57,7 @@ function loadBgUtils() {
       WebPoMinter: webpo.WebPoMinter,
       buildURL: utils.buildURL,
       GOOG_API_KEY: utils.GOOG_API_KEY,
+      parseLooseJSON: utils.parseLooseJSON,
     }));
   }
   return bgUtilsModulesPromise;
@@ -96,14 +97,17 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 // --- Step 1: watch-page scrape for initial attestation + ytcfg --------
 
 /**
- * Extracts a top-level `var name = <value>;` or `name.set(<value>)` JSON
- * blob from raw HTML. YouTube's watch page embeds several of these as
- * inline <script> tags; this is a plain string scan (no HTML parser
- * needed), matching how the same data is extracted elsewhere in this
- * codebase's style (regex over known literal markers, not a DOM parse of
- * the whole page).
+ * Extracts a top-level `var name = <value>;` or `name.set(<value>)` /
+ * `name(<value>)` JS-object blob from raw HTML. YouTube's watch page
+ * embeds several of these as inline <script> tags; this is a plain
+ * string scan (no HTML parser needed) to find the matching-depth brace
+ * span, then parseLooseJSON (bgutils-js) to actually parse it --
+ * plain JSON.parse fails on these blobs (confirmed against a live
+ * response: unquoted keys / JS object-literal syntax, not strict
+ * RFC-8259 JSON), which is exactly why bgutils-js ships its own
+ * lenient parser rather than assuming JSON.parse works here.
  */
-function extractInlineJson(html, marker) {
+async function extractInlineJson(html, marker) {
   const idx = html.indexOf(marker);
   if (idx === -1) return null;
   const start = html.indexOf('{', idx);
@@ -116,10 +120,11 @@ function extractInlineJson(html, marker) {
       depth--;
       if (depth === 0) {
         const raw = html.slice(start, i + 1);
+        const { parseLooseJSON } = await loadBgUtils();
         try {
-          return JSON.parse(raw);
+          return parseLooseJSON(raw);
         } catch (err) {
-          throw new Error(`extractInlineJson: found "${marker}" but JSON.parse failed: ${err.message}`);
+          throw new Error(`extractInlineJson: found "${marker}" but parseLooseJSON failed: ${err.message}`);
         }
       }
     }
@@ -137,15 +142,15 @@ function extractInlineJson(html, marker) {
  * Both wrap the same shape used by botGuardScript.js as
  * `initialAttestationData`, with `.R` (bgChallenge) and `.T` (eacrToken).
  */
-function extractInitialAttestation(html) {
+async function extractInitialAttestation(html) {
   for (const marker of ['window.ytAtN(', 'window.ytAtR =', 'window.ytAtR=']) {
-    const data = extractInlineJson(html, marker);
+    const data = await extractInlineJson(html, marker);
     if (data) return data;
   }
   return null;
 }
 
-function extractYtConfig(html) {
+async function extractYtConfig(html) {
   // ytcfg.set({...}) is the standard embed; take the first (largest)
   // occurrence, which is the full config blob near the top of <head>.
   return extractInlineJson(html, 'ytcfg.set(');
@@ -171,8 +176,8 @@ async function fetchWatchPageAttestationData(videoId = WATCH_PAGE_PROBE_VIDEO_ID
   }
   const html = await res.text();
 
-  const initialAttestationData = extractInitialAttestation(html);
-  const ytConfig = extractYtConfig(html);
+  const initialAttestationData = await extractInitialAttestation(html);
+  const ytConfig = await extractYtConfig(html);
   if (!initialAttestationData?.R?.bgChallenge) {
     throw new Error(
       'fetchWatchPageAttestationData: could not find window.ytAtN/ytAtR bgChallenge in watch page HTML ' +
