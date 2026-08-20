@@ -73,11 +73,13 @@ function chooseAudioFormat(formats, preferredItag) {
  * @param {{ preferredItag?: number, refetchInfo?: Function, refetchPoToken?: Function, invalidatePoToken?: Function, stallDetectionMs?: number, onReconnectStart?: Function, onReconnectEnd?: Function }} [opts]
  *   refetchInfo/refetchPoToken: called on a recoverable mid-stream failure
  *   to re-fetch info/token and reconnect seamlessly instead of erroring.
- *   invalidatePoToken: called (in the reconnect path only, once per
- *   attestation-triggered failure) immediately before refetchPoToken(), so
- *   the refetch is a genuine fresh BotGuard solve instead of a same-value
- *   cache hit. Not wired into the proactive inline setPoToken() refresh
- *   above, to avoid hammering BotGuard on every status event.
+ *   invalidatePoToken: called once per attempt (rate-limited by the same
+ *   guard as the inline setPoToken() refresh below) immediately before
+ *   refetchPoToken(), whenever attestation is seen stuck pending/required --
+ *   both from the inline live-stream refresh and, as a fallback, from the
+ *   outer reconnect path if the inline refresh didn't land. Without this,
+ *   refetchPoToken() just returns bgutil-rust's cached (already-rejected)
+ *   token and the attestation-pending state never actually resolves.
  * @returns {Promise<{ audioStream: ReadableStream<Uint8Array>, format: object, abort: () => void }>}
  *   `format.mimeType` tells the caller whether to demux as-is (Opus) or
  *   transcode (anything else). `abort` must be called on skip/failure —
@@ -131,7 +133,7 @@ async function deriveSabrParams(info, session) {
  * session mid-stream via RELOAD_PLAYER_RESPONSE.
  * @private
  */
-async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs, refetchPoToken, onPoTokenRefreshed) {
+async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resumeState, stallDetectionMs, refetchPoToken, invalidatePoToken, onPoTokenRefreshed) {
   const attemptStartedAt = Date.now();
   log.debug(
     'sabr',
@@ -150,6 +152,12 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
   // library resets it right after emitting, before our catch block runs.
   let reloadState = null;
   let tokenRefreshInFlight = false;
+  // Exposed to the outer reconnect logic: true if this attempt ever saw
+  // attestation stuck pending/required, regardless of what error ultimately
+  // tore the attempt down (in practice it's usually "No media parts..."
+  // from SabrStream's own retry exhaustion, NOT an attestation-labeled
+  // throw -- so the outer logic can't detect this by matching err.message).
+  let attestationPendingSeen = false;
   stream.on('reloadPlayerResponse', () => {
     log.debug('sabr', `reloadPlayerResponse event received (${Date.now() - attemptStartedAt}ms into this attempt)`);
     captureReloadState();
@@ -166,6 +174,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
       `${Date.now() - attemptStartedAt}ms into this attempt`
     );
     if (status?.status >= 2) {
+      attestationPendingSeen = true;
       log.error(
         'sabr',
         `attestation status ${label} on this attempt -- poToken ${tokenFingerprint(poToken)}`
@@ -178,7 +187,16 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
       // refresh is already in flight shouldn't stack overlapping mints.
       if (refetchPoToken && !tokenRefreshInFlight) {
         tokenRefreshInFlight = true;
-        refetchPoToken()
+        // Bust bgutil-rust's cache FIRST -- /get_pot fronts a
+        // content_binding -> po_token cache checked before any real
+        // BotGuard solve, so without this, refetchPoToken() below just
+        // hands back the same already-rejected token and setPoToken()
+        // becomes a no-op that never breaks the attestation-pending loop.
+        (invalidatePoToken ? invalidatePoToken().catch((invalidateErr) => {
+          log.error('sabr', `attestation ${label} -- invalidate_it call failed (continuing with refetch anyway): ${invalidateErr.message}`);
+          return false;
+        }) : Promise.resolve(false))
+          .then(() => refetchPoToken())
           .then((freshToken) => {
             log.debug(
               'sabr',
@@ -235,6 +253,7 @@ async function startSabrAttempt(params, clientInfo, poToken, preferredItag, resu
     audioStream,
     selectedFormats,
     getReloadState: () => reloadState,
+    sawAttestationPending: () => attestationPendingSeen,
   };
 }
 
@@ -251,7 +270,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
     poTokenRefreshedThisAttempt = true;
   };
   let attempt = await startSabrAttempt(
-    params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs, refetchPoToken, onPoTokenRefreshed
+    params, clientInfo, poToken, preferredItag, undefined, stallDetectionMs, refetchPoToken, invalidatePoToken, onPoTokenRefreshed
   );
   // Lets reconnect logging show the gap between loop iterations.
   let lastReconnectAt = trackStartedAt;
@@ -347,17 +366,21 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
                 );
               } else {
                 const previousToken = currentPoToken;
-                // This reconnect was itself caused by an attestation failure
-                // (not a reload/stall) -- the cached token just got rejected,
+                // The failed attempt saw attestation stuck pending/required
+                // at some point -- the cached token is what got rejected,
                 // so /get_pot alone would hand back that same cached value.
                 // Bust the cache first so refetchPoToken() below does a real
-                // BotGuard solve instead of a no-op cache hit.
-                if (invalidatePoToken && err.message === ATTESTATION_ERROR_MESSAGE) {
+                // BotGuard solve instead of a no-op cache hit. Checked via
+                // the attempt's own flag, not err.message -- the error that
+                // actually tears an attestation-stuck attempt down is
+                // usually SabrStream's own retry-exhaustion message, not an
+                // attestation-labeled one.
+                if (invalidatePoToken && attempt.sawAttestationPending()) {
                   const invalidated = await invalidatePoToken().catch((invalidateErr) => {
                     log.error('sabr', `invalidate_it call failed (continuing with refetch anyway): ${invalidateErr.message}`);
                     return false;
                   });
-                  log.debug('sabr', `attestation-triggered reconnect -- cache invalidation ${invalidated ? 'succeeded' : 'failed/skipped'}`);
+                  log.debug('sabr', `attestation-pending attempt failed -- cache invalidation ${invalidated ? 'succeeded' : 'failed/skipped'}`);
                 }
                 currentPoToken = await refetchPoToken();
                 log.debug(
@@ -378,6 +401,7 @@ async function buildSabrAudioStream(info, session, clientInfo, poToken, { prefer
               reloadState || undefined,
               stallDetectionMs,
               refetchPoToken,
+              invalidatePoToken,
               onPoTokenRefreshed
             );
             currentReader = attempt.audioStream.getReader();
