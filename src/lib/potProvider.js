@@ -5,8 +5,15 @@
 // README (v0.8.x):
 //   GET  /ping                                    -> 200 if ready
 //   POST /get_pot { "content_binding": "<...>" }   -> { "po_token": "<...>" }
+//   POST /invalidate_it { "content_binding": "<...>" } -> 200
 // Do NOT use /token or a video_id/data_sync_id body — those belonged to the
 // older TypeScript implementation and are not this binary's contract.
+//
+// /get_pot is fronted by SessionDataCaches (content_binding -> po_token),
+// checked before any real BotGuard solve -- calling /get_pot again after a
+// rejected token just returns the same cached value. /invalidate_it clears
+// that cache entry only (not the whole server), forcing the next /get_pot
+// for the same content_binding to do a genuine fresh solve.
 
 const { log } = require('./log');
 
@@ -82,17 +89,48 @@ async function getPoToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
   if (!token || typeof token !== 'string' || token.length === 0) {
     throw new Error(`POT provider /get_pot response missing po_token/poToken: ${JSON.stringify(data)}`);
   }
-  // Same snake/camel inconsistency as po_token/poToken. Surfacing these so
-  // a stuck-attempt investigation can see, per mint: fresh solve vs snapshot
-  // reuse, and how close to expiry the token already was.
-  const fromSnapshot = data.from_snapshot ?? data.fromSnapshot ?? '<unset>';
-  const validUntil = data.valid_until ?? data.validUntil ?? '<unset>';
   log.debug(
     'potProvider',
-    `minted ${tokenFingerprint(token)} for content_binding tail=…${contentBinding.slice(-6)} -- ` +
-    `from_snapshot=${fromSnapshot}, valid_until=${validUntil}`
+    `minted ${tokenFingerprint(token)} for content_binding tail=…${contentBinding.slice(-6)}`
   );
   return token;
 }
 
-module.exports = { waitForReady, getPoToken, DEFAULT_BASE_URL };
+/**
+ * Clears the cached po_token for `contentBinding` in bgutil-rust's
+ * SessionDataCaches, so the next getPoToken() call for the same binding
+ * does a real BotGuard solve instead of returning the same rejected token.
+ * Best-effort: a failure here shouldn't block the caller's subsequent
+ * getPoToken() retry, so this resolves false on error rather than throwing.
+ * @param {string} contentBinding
+ * @param {string} baseUrl
+ * @returns {Promise<boolean>} true if the invalidation call succeeded
+ */
+async function invalidateToken(contentBinding, baseUrl = DEFAULT_BASE_URL) {
+  if (!contentBinding) {
+    throw new Error('invalidateToken: contentBinding is required');
+  }
+  try {
+    const res = await fetchWithTimeout(
+      `${baseUrl}/invalidate_it`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content_binding: contentBinding }),
+      },
+      REQUEST_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      log.error('potProvider', `/invalidate_it failed: HTTP ${res.status} ${text}`);
+      return false;
+    }
+    log.debug('potProvider', `invalidated cached token for content_binding tail=…${contentBinding.slice(-6)}`);
+    return true;
+  } catch (err) {
+    log.error('potProvider', `/invalidate_it request failed: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { waitForReady, getPoToken, invalidateToken, DEFAULT_BASE_URL };

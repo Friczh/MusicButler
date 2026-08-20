@@ -11,7 +11,7 @@ const {
   entersState,
 } = require('@discordjs/voice');
 const { getSession, getSabrClientInfo } = require('./innertube');
-const { getPoToken } = require('./potProvider');
+const { getPoToken, invalidateToken } = require('./potProvider');
 const { buildSabrAudioStream } = require('./sabr');
 const { PrebufferTransform } = require('./prebuffer');
 const { buildOpusPipeline, buildTranscodedOpusPipeline } = require('./demuxPipeline');
@@ -489,6 +489,10 @@ class GuildPlayer {
         // Re-mints the VIDEO-bound token (distinct from the session
         // token set in _buildResource) -- fixes the stale-token case.
         refetchPoToken: () => getPoToken(track.videoId),
+        // Clears bgutil-rust's cached token for this video ID before the
+        // refetch above, when the reconnect was itself attestation-caused --
+        // otherwise refetchPoToken() just returns the same rejected token.
+        invalidatePoToken: () => invalidateToken(track.videoId),
         onReconnectStart: () => this._pauseForReconnect(),
         onReconnectEnd: () => this._unpauseAfterReconnect(),
       }
