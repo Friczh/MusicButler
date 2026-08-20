@@ -20,9 +20,9 @@ async function resolveAndQueue(query, { voiceChannel, guildId, channelId, reques
   }
 
   // Determine session client_type up front so we bootstrap the right
-  // context from the start (search has no music-specific path, so it
-  // always stays WEB).
-  const isMusicRequest = classification.kind !== 'search' && classification.isMusic;
+  // context from the start. Search always uses YTM now (resolveQuery),
+  // so it needs a YTMUSIC session same as a music.youtube.com link would.
+  const isMusicRequest = classification.kind === 'search' || classification.isMusic;
   const session = await getSession({ clientType: isMusicRequest ? 'YTMUSIC' : 'WEB' });
 
   let tracksToQueue;
