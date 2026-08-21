@@ -2,39 +2,37 @@
 
 // Self-managed PO token / BotGuard attestation provider, in-process.
 // Replaces the bgutil-rust HTTP sidecar with a direct integration of
-// LuanRT/BgUtils (bgutils-js) + jsdom, following the same flow FreeTube
-// ships in src/botGuardScript.js (verified against the live file on
-// FreeTube's development branch, confirmed working with current YouTube
-// as of writing).
+// LuanRT/BgUtils (bgutils-js) + jsdom.
 //
-// Flow, per client_type ('WEB' | 'YTMUSIC'):
-//   1. Fetch the YouTube watch page HTML for a throwaway video ID, and
-//      extract the embedded initial attestation data (window.ytAtR= or
-//      the newer window.ytAtN(...) call) plus ytcfg (window.ytcfg.set).
-//      This step exists because BotGuard now validates an EVENT_ID field
-//      it reads off `window.yt.config_` -- that field only appears in
-//      the watch-page's ytcfg blob, not in any InnerTube API response.
-//      (See jim60105/bgutil-ytdlp-pot-provider-rs CHANGELOG 0.7.2 and
-//      FreeTube PR #9607 -- both independently had to add this.)
-//   2. Load the BotGuard interpreter script into a jsdom `window`, with
-//      `window.yt = { config_: ytConfig }` set BEFORE execution.
+// Flow, verified against LuanRT/BgUtils's own README ("InnerTube
+// challenge fetcher example") and youtubei.js@17.2.0's installed source
+// (Innertube.js getAttestationChallenge(), parser/types/ParsedResponse.d.ts
+// for the exact bg_challenge/interpreter_url field shape):
+//   1. innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND') --
+//      a plain InnerTube /att/get call via youtubei.js's own request
+//      machinery (session headers/context handled for us). No watch-page
+//      HTML fetch/scrape -- an earlier version of this file did that,
+//      based on an unverified guess at YouTube's embed format, and it
+//      was wrong (see git history / prior incident). This is the
+//      officially documented approach instead.
+//   2. Load the BotGuard interpreter script into a jsdom `window`.
 //   3. BotGuardClient.create() + .snapshot() -> BotGuard response.
 //   4. POST the BotGuard response + a fixed public requestKey to
 //      Google's GenerateIT endpoint -> integrity token.
 //   5. WebPoMinter.create() with the integrity token -> mintCallback.
 //   6. mintCallback(contentBinding) -> PO token, base64.
 //
-// IMPORTANT (memory): steps 2-3 build a jsdom `window` + BotGuard VM,
-// which has a real, fixed ~120-160MB RSS cost (benchmarked locally: bare
-// node ~40MB -> +jsdom window ~160MB). That cost must be paid ONCE per
-// client_type, not per token mint -- jim60105/bgutil-ytdlp-pot-provider-rs
-// CHANGELOG 0.5.4 documents exactly this mistake in an earlier version of
-// their own Rust BotGuard integration (new VM per request -> ~25MB/request
-// leak, 249MB growth over 10 requests). This file keeps ONE persistent
-// BotGuardClient per client_type, reused for every mint, matching the fix
-// that changelog entry describes ("persistent worker thread pattern").
-// Verified locally: repeated mints against one reused jsdom window show
-// flat RSS, no growth.
+// NOT implemented here: setting `window.yt = { config_: ytConfig }`
+// (an EVENT_ID field BotGuard's interpreter can read) before running the
+// interpreter. FreeTube added this (PR #9607) via a full watch-page HTML
+// scrape, to fix a *mid-stream SABR reload* freeze -- not a failure of
+// initial token minting. Since this file only needs bg_challenge for a
+// single ENGAGEMENT_TYPE_UNBOUND mint (no ytConfig available without
+// scraping, which we've deliberately dropped), this is left out
+// intentionally, not by oversight. If BotGuard attestation specifically
+// starts failing mid-SABR-playback (ATTESTATION_PENDING loops -- see
+// sabr.js's refetchPoToken path), that's the first thing to revisit,
+// since it would line up with exactly what FreeTube's fix addressed.
 
 const { JSDOM } = require('jsdom');
 const { log } = require('./log');
@@ -57,27 +55,20 @@ function loadBgUtils() {
       WebPoMinter: webpo.WebPoMinter,
       buildURL: utils.buildURL,
       GOOG_API_KEY: utils.GOOG_API_KEY,
-      parseLooseJSON: utils.parseLooseJSON,
     }));
   }
   return bgUtilsModulesPromise;
 }
 
-// Public, well-known YouTube web client requestKey. Same constant used by
-// LuanRT/BgUtils issues, jim60105's Rust config default, and FreeTube's
-// botGuardScript.js. Not a secret -- it identifies the *client type*
-// (WEB) to Google's attestation service, not a per-user credential.
+// Public, well-known YouTube web client requestKey. Same constant used in
+// LuanRT/BgUtils's own README example, jim60105's Rust config default,
+// and FreeTube's botGuardScript.js. Not a secret -- it identifies the
+// *client type* (WEB) to Google's attestation service, not a per-user
+// credential.
 const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
 
-const WATCH_PAGE_TIMEOUT_MS = 15000;
 const CHALLENGE_TIMEOUT_MS = 15000;
 const SNAPSHOT_TIMEOUT_MS = 10000;
-
-// A stable, innocuous video ID used only to fetch a watch page for its
-// embedded attestation/ytcfg data. The content itself is irrelevant --
-// only the page's embedded config matters, and that config is the same
-// regardless of which video ID is used to request it.
-const WATCH_PAGE_PROBE_VIDEO_ID = 'jNQXAC9IVRw'; // "Me at the zoo"
 
 function tokenFingerprint(token) {
   if (!token) return '<none>';
@@ -94,204 +85,44 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
-// --- Step 1: watch-page scrape for initial attestation + ytcfg --------
-
 /**
- * Extracts a top-level `var name = <value>;` or `name.set(<value>)` /
- * `name(<value>)` JS-object blob from raw HTML. YouTube's watch page
- * embeds several of these as inline <script> tags; this is a plain
- * string scan (no HTML parser needed) to find the matching-depth brace
- * span, then parseLooseJSON (bgutils-js) to actually parse it --
- * plain JSON.parse fails on these blobs (confirmed against a live
- * response: unquoted keys / JS object-literal syntax, not strict
- * RFC-8259 JSON), which is exactly why bgutils-js ships its own
- * lenient parser rather than assuming JSON.parse works here.
+ * Builds ONE persistent jsdom window + BotGuardClient. This is the
+ * expensive, ~120-160MB-RSS step -- callers must cache and reuse the
+ * result, never call this per-token-mint. jim60105/bgutil-ytdlp-pot-
+ * provider-rs CHANGELOG 0.5.4 documents exactly this mistake in an
+ * earlier version of their own Rust BotGuard integration (new VM per
+ * request -> ~25MB/request leak, 249MB growth over 10 requests).
+ *
+ * @param {import('youtubei.js').Innertube} innertube - a live Innertube
+ *   instance, used only to call .getAttestationChallenge().
  */
-async function extractInlineJson(html, marker) {
-  const idx = html.indexOf(marker);
-  if (idx === -1) return null;
-  const start = html.indexOf('{', idx);
-  if (start === -1) return null;
-
-  // Brace-depth counting must skip over string-literal contents, or a
-  // literal '{'/'}' character inside a quoted field (BotGuard's
-  // `program` field is a large packed/obfuscated blob -- exactly the
-  // kind of content likely to contain stray brace characters) cuts the
-  // slice at the wrong point and hands parseLooseJSON a truncated,
-  // invalid fragment. This tracks single/double-quote string state and
-  // honors backslash-escapes while counting.
-  let depth = 0;
-  let inString = null; // null | '"' | "'"
-  for (let i = start; i < html.length; i++) {
-    const ch = html[i];
-    if (inString) {
-      if (ch === '\\') { i++; continue; } // skip escaped char
-      if (ch === inString) inString = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inString = ch; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        const raw = html.slice(start, i + 1);
-        const { parseLooseJSON } = await loadBgUtils();
-        try {
-          return parseLooseJSON(raw);
-        } catch (err) {
-          throw new Error(
-            `extractInlineJson: found "${marker}" but parseLooseJSON failed: ${err.message} ` +
-            `(extracted ${raw.length} chars, head="${raw.slice(0, 80)}")`
-          );
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Extracts the initial BotGuard attestation challenge embedded in the
- * watch page. YouTube has used two formats (confirmed against
- * jim60105/bgutil-ytdlp-pot-provider-rs CHANGELOG 0.7.2 and FreeTube's
- * botGuardScript.js, which handle both):
- *   - legacy: window.ytAtR = {...};
- *   - current: window.ytAtN({...});  (function-call form)
- * Both wrap the same shape used by botGuardScript.js as
- * `initialAttestationData`, with `.R` (bgChallenge) and `.T` (eacrToken).
- */
-async function extractInitialAttestation(html) {
-  for (const marker of ['window.ytAtN(', 'window.ytAtR =', 'window.ytAtR=']) {
-    const data = await extractInlineJson(html, marker);
-    if (data) return data;
-  }
-  return null;
-}
-
-async function extractYtConfig(html) {
-  // ytcfg.set({...}) is the standard embed; take the first (largest)
-  // occurrence, which is the full config blob near the top of <head>.
-  return extractInlineJson(html, 'ytcfg.set(');
-}
-
-async function fetchWatchPageAttestationData(videoId = WATCH_PAGE_PROBE_VIDEO_ID) {
-  const res = await fetchWithTimeout(
-    `https://www.youtube.com/watch?v=${videoId}`,
-    {
-      headers: {
-        // A plausible desktop UA -- BotGuard/YouTube's watch-page
-        // rendering path can differ (or omit the attestation embed
-        // entirely) for unrecognized/bot-flagged user agents.
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-          '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    },
-    WATCH_PAGE_TIMEOUT_MS
-  );
-  if (!res.ok) {
-    throw new Error(`fetchWatchPageAttestationData: watch page fetch failed: HTTP ${res.status}`);
-  }
-  const html = await res.text();
-
-  // FreeTube (same HTML-scrape approach, actively maintained) has had
-  // several recent reports of this exact failure mode: YouTube serving a
-  // CAPTCHA/consent page instead of the real watch page for some
-  // requests (bot-detection on the IP/UA), which has no ytcfg/attestation
-  // embed at all. Detecting it explicitly here gives a distinguishable
-  // error instead of a confusing "marker not found" downstream.
-  if (/action="https:\/\/consent\.youtube\.com/.test(html) || /id="captcha-form"/.test(html)) {
+async function createBotGuardInstance(innertube) {
+  if (!innertube || typeof innertube.getAttestationChallenge !== 'function') {
     throw new Error(
-      'fetchWatchPageAttestationData: YouTube served a consent/CAPTCHA page instead of the watch page ' +
-      '-- likely IP/UA-based bot detection, not a parsing bug. A VPN/IP change or different egress path ' +
-      'may be needed; see FreeTubeApp/FreeTube#9632.'
+      'createBotGuardInstance: expected a youtubei.js Innertube instance ' +
+      '(with .getAttestationChallenge()), got something else'
     );
   }
 
-  const initialAttestationData = await extractInitialAttestation(html);
-  const ytConfig = await extractYtConfig(html);
-  if (!initialAttestationData?.R?.bgChallenge) {
-    throw new Error(
-      'fetchWatchPageAttestationData: could not find window.ytAtN/ytAtR bgChallenge in watch page HTML ' +
-      '(YouTube may have changed the embed format again)'
-    );
+  const { BotGuardClient } = await loadBgUtils();
+
+  const challengeResponse = await innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND');
+  const bgChallenge = challengeResponse?.bg_challenge;
+  if (!bgChallenge) {
+    throw new Error('createBotGuardInstance: getAttestationChallenge() returned no bg_challenge');
   }
-  if (!ytConfig) {
-    throw new Error('fetchWatchPageAttestationData: could not find ytcfg.set(...) in watch page HTML');
-  }
-  return { initialAttestationData, ytConfig };
-}
-
-// --- Step 2-5: BotGuard VM load + snapshot + integrity token ----------
-
-/**
- * Resolves the interpreter script URL + BotGuard program, falling back to
- * InnerTube's att/get endpoint (with the eacrToken from the watch-page
- * scrape) if the initial embed didn't include an interpreter URL inline
- * -- mirrors botGuardScript.js's fallback exactly.
- */
-async function resolveChallenge(initialAttestationData, context) {
-  let challengeData = initialAttestationData.R;
-  let interpreterUrl = challengeData?.bgChallenge?.interpreterUrl
-    ?.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
-
+  let interpreterUrl = bgChallenge.interpreter_url
+    ?.private_do_not_access_or_else_trusted_resource_url_wrapped_value;
   if (!interpreterUrl) {
-    const res = await fetchWithTimeout(
-      'https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false&alt=json',
-      {
-        method: 'POST',
-        headers: {
-          Accept: '*/*',
-          'Content-Type': 'application/json',
-          'X-Goog-Visitor-Id': context.client.visitorData,
-          'X-Youtube-Client-Version': context.client.clientVersion,
-          'X-Youtube-Client-Name': '1',
-        },
-        body: JSON.stringify({
-          engagementType: 'ENGAGEMENT_TYPE_UNBOUND',
-          eacrToken: initialAttestationData.T,
-          context,
-        }),
-      },
-      CHALLENGE_TIMEOUT_MS
-    );
-    if (!res.ok) {
-      throw new Error(`resolveChallenge: att/get failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
-    }
-    challengeData = await res.json();
-    interpreterUrl = challengeData?.bgChallenge?.interpreterUrl
-      ?.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
-  }
-
-  if (!challengeData?.bgChallenge || !interpreterUrl) {
-    throw new Error('resolveChallenge: failed to obtain a BotGuard challenge');
+    throw new Error('createBotGuardInstance: bg_challenge had no interpreter_url');
   }
   if (interpreterUrl.startsWith('//')) interpreterUrl = `https:${interpreterUrl}`;
-  return { challengeData, interpreterUrl };
-}
-
-/**
- * Builds ONE persistent jsdom window + BotGuardClient for a client_type.
- * This is the expensive, ~120-160MB-RSS step -- callers must cache and
- * reuse the result, never call this per-token-mint. See the file-level
- * comment above for why.
- */
-async function createBotGuardInstance(context) {
-  const { BotGuardClient } = await loadBgUtils();
-  const { initialAttestationData, ytConfig } = await fetchWatchPageAttestationData();
-  const { challengeData, interpreterUrl } = await resolveChallenge(initialAttestationData, context);
 
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     url: 'https://www.youtube.com/',
     runScripts: 'dangerously',
   });
   const { window } = dom;
-
-  // BotGuard reads its EVENT_ID (and other config) off window.yt.config_
-  // -- this must be set BEFORE the interpreter script executes. This is
-  // the fix both jim60105's Rust provider (CHANGELOG 0.7.2) and FreeTube
-  // (PR #9607) had to add after YouTube started validating it.
-  window.yt = { config_: ytConfig };
 
   const scriptRes = await fetchWithTimeout(interpreterUrl, {}, CHALLENGE_TIMEOUT_MS);
   if (!scriptRes.ok) {
@@ -304,8 +135,8 @@ async function createBotGuardInstance(context) {
   window.eval(interpreterJavascript);
 
   const botGuard = await BotGuardClient.create({
-    program: challengeData.bgChallenge.program,
-    globalName: challengeData.bgChallenge.globalName,
+    program: bgChallenge.program,
+    globalName: bgChallenge.global_name,
     globalObject: window,
   });
 
@@ -352,13 +183,13 @@ const instances = new Map();
 // after hitting exactly this with long-running processes.
 const INSTANCE_TTL_MS = 4 * 60 * 60 * 1000; // 4h
 
-async function getOrCreateInstance(clientKey, context) {
+async function getOrCreateInstance(clientKey, innertube) {
   const entry = instances.get(clientKey);
   const expired = !entry || Date.now() - entry.createdAt > INSTANCE_TTL_MS;
   if (entry?.instancePromise && !expired) {
     return entry.instancePromise;
   }
-  const instancePromise = createBotGuardInstance(context).catch((err) => {
+  const instancePromise = createBotGuardInstance(innertube).catch((err) => {
     // Don't cache a failed build -- next call should retry, not keep
     // returning the same rejected promise forever.
     instances.delete(clientKey);
@@ -374,18 +205,17 @@ async function getOrCreateInstance(clientKey, context) {
  * same contract as before).
  *
  * @param {string} contentBinding
- * @param {import('youtubei.js').Session['context']} context - innertube
- *   session context, used only if the initial watch-page embed lacks an
- *   inline interpreter URL and the att/get fallback is needed.
+ * @param {import('youtubei.js').Innertube} innertube - a live Innertube
+ *   instance, used to fetch the attestation challenge.
  * @param {{ clientKey?: string, bypassCache?: boolean }} [opts] -
  *   clientKey selects which persistent BotGuard instance to use/build
  *   (defaults to a single shared instance). bypassCache forces a full
- *   rebuild of that instance (fresh watch-page scrape + fresh VM) instead
- *   of reusing the cached one -- use for refetch/retry after a rejected
+ *   rebuild of that instance (fresh challenge + fresh VM) instead of
+ *   reusing the cached one -- use for refetch/retry after a rejected
  *   token, same as the old bgutil-rust bypass_cache semantics.
  * @returns {Promise<string>} po_token
  */
-async function getPoToken(contentBinding, context, { clientKey = 'default', bypassCache = false } = {}) {
+async function getPoToken(contentBinding, innertube, { clientKey = 'default', bypassCache = false } = {}) {
   if (!contentBinding) {
     throw new Error('getPoToken: contentBinding is required');
   }
@@ -393,7 +223,7 @@ async function getPoToken(contentBinding, context, { clientKey = 'default', bypa
   if (bypassCache) {
     instances.delete(clientKey);
   }
-  const { botGuard } = await getOrCreateInstance(clientKey, context);
+  const { botGuard } = await getOrCreateInstance(clientKey, innertube);
 
   const webPoSignalOutput = [];
   const botGuardResponse = await botGuard.snapshot({ webPoSignalOutput }, SNAPSHOT_TIMEOUT_MS);
