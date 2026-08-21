@@ -37,6 +37,25 @@
 const { JSDOM } = require('jsdom');
 const { log } = require('./log');
 
+// `canvas` (node-canvas) isn't imported directly anywhere in this file --
+// it's a peer of jsdom (jsdom@26 requires canvas@^3.2.3) that jsdom
+// auto-detects and wires up internally to back HTMLCanvasElement's real
+// getContext('2d'). Without it, jsdom's canvas is a stub and
+// getContext() throws "Not implemented" -- and BotGuard's interpreter
+// does call it as part of its environment-integrity/fingerprint check,
+// so a missing/stub canvas produces a degraded fingerprint that Google's
+// server then rejects (WebPoMinter throws "APF:Failed", confirmed
+// against a live failure). LuanRT/BgUtils's own README says as much:
+// jsdom alone isn't a "good enough" document implementation for
+// Node.js/Deno/Bun; only real Chromium (Electron etc.) works with zero
+// extra deps. jim60105's own predecessor TypeScript POT-provider server
+// (same stack: bgutils-js + jsdom + youtubei.js) depended on canvas too.
+// The prebuilt canvas binary bundles its own libcairo/libpango/etc.
+// shared libraries (resolved from node_modules/canvas/build/Release/,
+// not system paths), so no Dockerfile apt-get changes are needed for
+// this -- verified by inspecting the built binary's actual dynamic
+// library dependencies.
+
 // bgutils-js ships ESM-only (package.json "type": "module", no "require"
 // export condition) -- plain require('bgutils-js/...') throws
 // ERR_REQUIRE_ESM in this CommonJS codebase. dynamic import() is the

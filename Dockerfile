@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 
-# PO tokens are now minted in-process via LuanRT/BgUtils (bgutils-js) +
-# jsdom -- see src/lib/potProvider.js. No more bgutil-rust sidecar binary,
+# PO tokens are minted in-process via LuanRT/BgUtils (bgutils-js) + jsdom
+# + canvas (node-canvas -- required by jsdom for a working
+# HTMLCanvasElement.getContext(), which BotGuard's interpreter calls as
+# part of its environment-integrity check; see src/lib/potProvider.js's
+# top comment for the full story). No more bgutil-rust sidecar binary,
 # no fetch stage, no start.sh, no POT_SERVER_*/POT_PROVIDER_URL env vars.
-# The Node runtime itself makes the outbound calls (watch-page scrape,
-# BotGuard interpreter fetch, GenerateIT), so no separate glibc-version
-# constraint from a prebuilt Rust release binary applies here -- any
-# node:*-bookworm-slim base works.
 FROM node:20-bookworm-slim AS final
 
 # ca-certificates -- potProvider.js's own HTTPS calls to youtube.com /
@@ -29,6 +28,18 @@ COPY package.json package-lock.json* ./
 # -- so the fix here is telling npm to ignore the stale peer range,
 # not downgrading a version we've verified works.
 RUN npm ci --omit=dev --legacy-peer-deps || npm install --omit=dev --legacy-peer-deps
+
+# canvas (node-canvas) is a native addon; npm's postinstall fetches a
+# prebuilt binary for the target Node ABI/platform via prebuild-install
+# (bundles its own libcairo/libpango/etc. .so files -- confirmed by
+# inspecting the built binary's actual dynamic library dependencies, so
+# no apt-get system library install is needed here). This check fails
+# the BUILD loudly if no matching prebuilt binary was found for this
+# base image (which would otherwise silently fall through to jsdom's
+# canvas stub and only surface as a confusing BotGuard "APF:Failed"
+# error the first time someone runs /play in production).
+RUN node -e "require('canvas').createCanvas(1, 1).getContext('2d')" \
+    && echo "canvas: native binary loaded OK"
 
 COPY src ./src
 COPY assets ./assets
