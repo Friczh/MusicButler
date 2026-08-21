@@ -112,9 +112,24 @@ async function extractInlineJson(html, marker) {
   if (idx === -1) return null;
   const start = html.indexOf('{', idx);
   if (start === -1) return null;
+
+  // Brace-depth counting must skip over string-literal contents, or a
+  // literal '{'/'}' character inside a quoted field (BotGuard's
+  // `program` field is a large packed/obfuscated blob -- exactly the
+  // kind of content likely to contain stray brace characters) cuts the
+  // slice at the wrong point and hands parseLooseJSON a truncated,
+  // invalid fragment. This tracks single/double-quote string state and
+  // honors backslash-escapes while counting.
   let depth = 0;
+  let inString = null; // null | '"' | "'"
   for (let i = start; i < html.length; i++) {
     const ch = html[i];
+    if (inString) {
+      if (ch === '\\') { i++; continue; } // skip escaped char
+      if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = ch; continue; }
     if (ch === '{') depth++;
     else if (ch === '}') {
       depth--;
@@ -124,7 +139,10 @@ async function extractInlineJson(html, marker) {
         try {
           return parseLooseJSON(raw);
         } catch (err) {
-          throw new Error(`extractInlineJson: found "${marker}" but parseLooseJSON failed: ${err.message}`);
+          throw new Error(
+            `extractInlineJson: found "${marker}" but parseLooseJSON failed: ${err.message} ` +
+            `(extracted ${raw.length} chars, head="${raw.slice(0, 80)}")`
+          );
         }
       }
     }
@@ -175,6 +193,20 @@ async function fetchWatchPageAttestationData(videoId = WATCH_PAGE_PROBE_VIDEO_ID
     throw new Error(`fetchWatchPageAttestationData: watch page fetch failed: HTTP ${res.status}`);
   }
   const html = await res.text();
+
+  // FreeTube (same HTML-scrape approach, actively maintained) has had
+  // several recent reports of this exact failure mode: YouTube serving a
+  // CAPTCHA/consent page instead of the real watch page for some
+  // requests (bot-detection on the IP/UA), which has no ytcfg/attestation
+  // embed at all. Detecting it explicitly here gives a distinguishable
+  // error instead of a confusing "marker not found" downstream.
+  if (/action="https:\/\/consent\.youtube\.com/.test(html) || /id="captcha-form"/.test(html)) {
+    throw new Error(
+      'fetchWatchPageAttestationData: YouTube served a consent/CAPTCHA page instead of the watch page ' +
+      '-- likely IP/UA-based bot detection, not a parsing bug. A VPN/IP change or different egress path ' +
+      'may be needed; see FreeTubeApp/FreeTube#9632.'
+    );
+  }
 
   const initialAttestationData = await extractInitialAttestation(html);
   const ytConfig = await extractYtConfig(html);
