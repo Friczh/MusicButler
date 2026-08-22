@@ -264,6 +264,40 @@ async function createBotGuardInstance(innertube) {
   window.navigator.__defineGetter__('webdriver', () => false);
   window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
 
+  // BotGuard performs a connectivity probe by setting an <img>'s src to
+  // a `generate_204` endpoint, which intentionally responds with an
+  // empty 204 body -- not a valid image. Real Chrome fires the <img>
+  // 'error' event in that case (expected/harmless: the probe only
+  // cares that the request reached the server). jsdom's image pipeline
+  // instead throws inside its internal resource-loader promise chain
+  // (even with `canvas` installed, since there's no image data to
+  // decode), which surfaces as an unhandled rejection and aborts
+  // BotGuard's entire init ("APF:Failed"). Stub window.Image so the
+  // probe still performs a real network request -- reachability is
+  // genuinely checked -- but resolves through a normal 'error' event
+  // instead of jsdom's crashing decode path.
+  window.Image = class extends window.EventTarget {
+    constructor() {
+      super();
+      this._src = '';
+      this.onload = null;
+      this.onerror = null;
+    }
+    set src(value) {
+      this._src = value;
+      fetchWithTimeout(value, { headers: { 'User-Agent': DESKTOP_CHROME_UA } }, CHALLENGE_TIMEOUT_MS)
+        .catch(() => null) // network failure -- still resolve to an 'error' dispatch below
+        .then(() => {
+          const ev = new window.Event('error');
+          this.dispatchEvent(ev);
+          if (typeof this.onerror === 'function') this.onerror(ev);
+        });
+    }
+    get src() {
+      return this._src;
+    }
+  };
+
   // BotGuard's interpreter reads its EVENT_ID (and other config) off
   // window.yt.config_ -- must be set BEFORE the interpreter script
   // executes. Confirmed required per LuanRT's own explanation (quoted
