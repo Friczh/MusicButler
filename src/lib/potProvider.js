@@ -34,7 +34,7 @@
 // sabr.js's refetchPoToken path), that's the first thing to revisit,
 // since it would line up with exactly what FreeTube's fix addressed.
 
-const { JSDOM } = require('jsdom');
+const { JSDOM, ResourceLoader } = require('jsdom');
 const { log } = require('./log');
 
 // `canvas` (node-canvas) isn't imported directly anywhere in this file --
@@ -74,6 +74,7 @@ function loadBgUtils() {
       WebPoMinter: webpo.WebPoMinter,
       buildURL: utils.buildURL,
       GOOG_API_KEY: utils.GOOG_API_KEY,
+      parseLooseJSON: utils.parseLooseJSON,
     }));
   }
   return bgUtilsModulesPromise;
@@ -85,6 +86,19 @@ function loadBgUtils() {
 // *client type* (WEB) to Google's attestation service, not a per-user
 // credential.
 const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
+
+// jsdom's default navigator.userAgent literally contains the substring
+// "jsdom/<version>" -- confirmed by inspecting jsdom's own installed
+// source (lib/jsdom/browser/resources/resource-loader.js's default). A
+// plain, well-known UA-sniffing check would treat that as an instant,
+// unambiguous synthetic-environment signal. This (a realistic desktop
+// Chrome UA, window.chrome presence, navigator.webdriver === false) are
+// standard, well-documented headless-browser-detection countermeasures
+// -- not YouTube/BotGuard-specific reverse-engineering, just closing
+// obvious jsdom-vs-real-browser gaps that any basic fingerprint check
+// would otherwise trip on immediately.
+const DESKTOP_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 
 const CHALLENGE_TIMEOUT_MS = 15000;
 const SNAPSHOT_TIMEOUT_MS = 10000;
@@ -102,6 +116,96 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// A stable, innocuous video ID used only to fetch a watch page for its
+// embedded ytcfg blob. The content itself is irrelevant -- only the
+// page's embedded config matters, and that's the same regardless of
+// which video ID is used to request it.
+const YTCFG_PROBE_VIDEO_ID = 'jNQXAC9IVRw'; // "Me at the zoo"
+const YTCFG_FETCH_TIMEOUT_MS = 15000;
+
+/**
+ * Extracts the ytcfg.set({...}) blob embedded in a YouTube watch page.
+ * Needed for window.yt.config_ (see fetchYtConfig's caller) -- confirmed
+ * necessary even when the attestation challenge itself comes from
+ * innertube.getAttestationChallenge() rather than a page scrape: per
+ * LuanRT (BgUtils author, quoted via FreeTubeApp/FreeTube#9607), BotGuard
+ * validates an EVENT_ID field read from this config "together with the
+ * embedded /att/get response OR doing your own /att/get request" --
+ * i.e. it applies to both paths, not just the HTML-scrape one. bgutils-js
+ * v4.0.3 (the version installed here) updated its own official Node.js
+ * example to extract this same ytcfg from the page for the same reason.
+ *
+ * Brace-matching here is string-literal-aware (tracks quote state,
+ * honors backslash-escapes) -- a naive counter previously misfired on a
+ * quoted field containing a literal brace character; see git history /
+ * prior incident for the concrete failure this caused.
+ */
+async function fetchYtConfig(videoId = YTCFG_PROBE_VIDEO_ID) {
+  const res = await fetchWithTimeout(
+    `https://www.youtube.com/watch?v=${videoId}`,
+    { headers: { 'User-Agent': DESKTOP_CHROME_UA, 'Accept-Language': 'en-US,en;q=0.9' } },
+    YTCFG_FETCH_TIMEOUT_MS
+  );
+  if (!res.ok) {
+    throw new Error(`fetchYtConfig: watch page fetch failed: HTTP ${res.status}`);
+  }
+  const html = await res.text();
+
+  // ytcfg.set(...) appears multiple times on a watch page -- some calls
+  // are the two-arg string form (e.g. ytcfg.set('EXPERIMENT_FLAGS', ...)),
+  // not the single-object form we want. A plain indexOf(marker) can lock
+  // onto one of those and then indexOf('{', idx) skips forward past it
+  // to an unrelated object elsewhere on the page (confirmed: it was
+  // landing on the window.yterr error-boilerplate block). Require the
+  // '{' to be the next non-whitespace character after the marker, and
+  // advance to subsequent occurrences otherwise.
+  const marker = 'ytcfg.set(';
+  let searchFrom = 0;
+  let start = -1;
+  while (true) {
+    const idx = html.indexOf(marker, searchFrom);
+    if (idx === -1) {
+      throw new Error('fetchYtConfig: could not find ytcfg.set({...}) (object form) in watch page HTML');
+    }
+    let i = idx + marker.length;
+    while (i < html.length && /\s/.test(html[i])) i++;
+    if (html[i] === '{') {
+      start = i;
+      break;
+    }
+    searchFrom = idx + marker.length;
+  }
+
+  let depth = 0;
+  let inString = null; // null | '"' | "'"
+  for (let i = start; i < html.length; i++) {
+    const ch = html[i];
+    if (inString) {
+      if (ch === '\\') { i++; continue; }
+      if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        const raw = html.slice(start, i + 1);
+        const { parseLooseJSON } = await loadBgUtils();
+        try {
+          return parseLooseJSON(raw);
+        } catch (err) {
+          throw new Error(
+            `fetchYtConfig: parseLooseJSON failed: ${err.message} ` +
+            `(extracted ${raw.length} chars, head="${raw.slice(0, 80)}")`
+          );
+        }
+      }
+    }
+  }
+  throw new Error('fetchYtConfig: unterminated ytcfg block (brace depth never reached 0)');
 }
 
 /**
@@ -125,7 +229,14 @@ async function createBotGuardInstance(innertube) {
 
   const { BotGuardClient } = await loadBgUtils();
 
-  const challengeResponse = await innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND');
+  // Fetched in parallel -- independent network calls, both needed before
+  // the interpreter can run correctly (see fetchYtConfig's doc comment
+  // for why ytConfig is required even on this getAttestationChallenge()
+  // path, not just a full HTML-scrape path).
+  const [challengeResponse, ytConfig] = await Promise.all([
+    innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND'),
+    fetchYtConfig(),
+  ]);
   const bgChallenge = challengeResponse?.bg_challenge;
   if (!bgChallenge) {
     throw new Error('createBotGuardInstance: getAttestationChallenge() returned no bg_challenge');
@@ -140,10 +251,31 @@ async function createBotGuardInstance(innertube) {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     url: 'https://www.youtube.com/',
     runScripts: 'dangerously',
+    resources: new ResourceLoader({ userAgent: DESKTOP_CHROME_UA }),
   });
   const { window } = dom;
 
-  const scriptRes = await fetchWithTimeout(interpreterUrl, {}, CHALLENGE_TIMEOUT_MS);
+  // Real Chrome exposes window.chrome (runtime/loadTimes/csi -- a common
+  // headless-detection check specifically looks for its absence) and
+  // navigator.webdriver === false (jsdom leaves it undefined, which
+  // real automation-controlled Chrome also sets to true -- undefined is
+  // itself an atypical, non-real-browser value). Minimal stubs, not a
+  // full emulation -- just closing gaps a basic check would notice.
+  window.navigator.__defineGetter__('webdriver', () => false);
+  window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+
+  // BotGuard's interpreter reads its EVENT_ID (and other config) off
+  // window.yt.config_ -- must be set BEFORE the interpreter script
+  // executes. Confirmed required per LuanRT's own explanation (quoted
+  // via FreeTubeApp/FreeTube#9607) and bgutils-js's own v4.0.3 example
+  // update; see fetchYtConfig's doc comment.
+  window.yt = { config_: ytConfig };
+
+  const scriptRes = await fetchWithTimeout(
+    interpreterUrl,
+    { headers: { 'User-Agent': DESKTOP_CHROME_UA } },
+    CHALLENGE_TIMEOUT_MS
+  );
   if (!scriptRes.ok) {
     throw new Error(`createBotGuardInstance: interpreter script fetch failed: HTTP ${scriptRes.status}`);
   }
@@ -172,6 +304,7 @@ async function mintIntegrityToken(botGuardResponse) {
         'content-type': 'application/json+protobuf',
         'x-goog-api-key': GOOG_API_KEY,
         'x-user-agent': 'grpc-web-javascript/0.1',
+        'User-Agent': DESKTOP_CHROME_UA,
       },
       body: JSON.stringify([REQUEST_KEY, botGuardResponse]),
     },
